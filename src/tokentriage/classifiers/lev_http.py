@@ -1,0 +1,74 @@
+"""lev behind `lev serve` (or any TypeSafe /v1/systemone server).
+
+The state sent here contains the user's prompt, so the server is restricted to this
+machine or a private network unless allow_remote_lev is set, and then https is required.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+import time
+
+from .. import pii
+from ..features import RequestFeatures
+from ..providers import host_of
+from .base import LEV_QUESTIONS, Signals, signals_from_answers
+
+
+class UnsafeLevEndpoint(ValueError):
+    """The lev-http URL would send prompts somewhere this config does not allow."""
+
+
+def _is_private(host: str) -> bool:
+    if host in ("localhost",) or host.endswith((".local", ".internal", ".localhost")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def check_endpoint(url: str, allow_remote: bool) -> None:
+    host = host_of(url) or ""
+    if _is_private(host):
+        return
+    if not allow_remote:
+        raise UnsafeLevEndpoint(
+            f"lev_url host {host!r} is not local/private; prompts would leave your network. "
+            "Set allow_remote_lev=True if this server is yours."
+        )
+    if not url.lower().startswith("https://"):
+        raise UnsafeLevEndpoint(f"remote lev_url must use https, got {url!r}")
+
+
+class LevHttpClassifier:
+    name = "lev-http"
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        timeout_s: float = 1.5,
+        api_key: str | None = None,
+        allow_remote: bool = False,
+        redact_input: bool = True,
+    ):
+        import httpx
+
+        check_endpoint(base_url, allow_remote)
+        self.redact_input = redact_input
+        token = api_key or os.environ.get("TOKENTRIAGE_LEV_API_KEY") or "local"
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            timeout=timeout_s,
+            headers={"Authorization": f"Bearer {token}"},
+            follow_redirects=False,  # a redirect could carry the prompt to another host
+        )
+
+    def classify(self, features: RequestFeatures, state: str) -> Signals:
+        start = time.perf_counter()
+        payload = pii.redact(state, self.redact_input)
+        resp = self._client.post("/v1/systemone", json={"state": payload, "questions": LEV_QUESTIONS})
+        resp.raise_for_status()
+        return signals_from_answers(resp.json()["answers"], self.name, (time.perf_counter() - start) * 1000)
