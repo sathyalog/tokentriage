@@ -46,7 +46,7 @@ def extract(messages: list[BaseMessage], tools: list | None = None, tool_choice:
     """
     from ..features import is_forced_tool_choice
 
-    system, last_user = [], ""
+    system, last_user, user_texts = [], "", []
     attachments: Counter = Counter()
     turns = tool_results = total_chars = pdfs = 0
 
@@ -60,6 +60,7 @@ def extract(messages: list[BaseMessage], tools: list | None = None, tool_choice:
             system.append(text)
         elif isinstance(m, HumanMessage):
             last_user = text
+            user_texts.append(text)
             turns += 1
         elif isinstance(m, ToolMessage):
             tool_results += 1
@@ -77,4 +78,5 @@ def extract(messages: list[BaseMessage], tools: list | None = None, tool_choice:
         total_chars=total_chars,
         pdfs=pdfs,
         forced_tool=bool(tools) and is_forced_tool_choice(tool_choice),
+        earlier_user=tuple(t for t in user_texts[:-1] if t.strip())[-10:],
     )

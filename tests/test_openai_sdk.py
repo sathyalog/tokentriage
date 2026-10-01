@@ -1,175 +1,88 @@
-"""Tests for OpenAI SDK routing integration."""
+"""OpenAI SDK routing with the real `openai` client; only the HTTP transport is faked."""
 
+import json
+
+import httpx2
 import pytest
-from unittest.mock import Mock
-
-import tokentriage
-from tokentriage import Router, RouterConfig
-from tokentriage.integrations import openai_sdk
 from conftest import SIMPLE, FixedClassifier
 
-
-KEY = "sk-test-TESTKEY000000000000000000"
-
-
-class FakeChatCompletion:
-    """Fake OpenAI ChatCompletion response."""
-    def __init__(self, content, model, usage=None):
-        self.id = f"chatcmpl-{id(self)}"
-        self.object = "chat.completion"
-        self.created = 1234567890
-        self.model = model
-        self.choices = [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]
-        self.usage = usage or {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
-
-
-class FakeCompletions:
-    """Fake OpenAI client.chat.completions object."""
-    
-    def __init__(self, client):
-        self.client = client
-        self.calls = []
-    
-    def create(self, *, model, messages, tools=None, stream=False, **kwargs):
-        self.calls.append(("create", model, messages, tools, stream))
-        return FakeChatCompletion(f"response from {model}", model)
-
-
-class FakeChat:
-    """Fake OpenAI client.chat object."""
-    
-    def __init__(self, client):
-        self.client = client
-        self.completions = FakeCompletions(client)
-
-
-class FakeOpenAI:
-    """Fake OpenAI client - stores chat instance."""
-    
-    def __init__(self, api_key=None, **kwargs):
-        self.api_key = api_key
-        self.kwargs = kwargs
-        self.chat = FakeChat(self)
-    
-    def model_copy(self, *, update=None):
-        copy = FakeOpenAI(api_key=self.api_key, **self.kwargs)
-        if update:
-            for k, v in update.items():
-                setattr(copy, k, v)
-        return copy
-
-
-class FakeAsyncCompletions:
-    """Fake async OpenAI client.chat.completions object."""
-    
-    def __init__(self, client):
-        self.client = client
-        self.calls = []
-    
-    async def create(self, *, model, messages, tools=None, stream=False, **kwargs):
-        self.calls.append(("create", model, messages, tools, stream))
-        return FakeChatCompletion(f"response from {model}", model)
-
-
-class FakeAsyncChat:
-    """Fake async OpenAI client.chat object."""
-    
-    def __init__(self, client):
-        self.client = client
-        self.completions = FakeAsyncCompletions(client)
-
-
-class FakeAsyncOpenAI:
-    """Fake AsyncOpenAI client."""
-    
-    def __init__(self, api_key=None, **kwargs):
-        self.api_key = api_key
-        self.kwargs = kwargs
-        self.chat = FakeAsyncChat(self)
-    
-    def model_copy(self, *, update=None):
-        copy = FakeAsyncOpenAI(api_key=self.api_key, **self.kwargs)
-        if update:
-            for k, v in update.items():
-                setattr(copy, k, v)
-        return copy
+import openai
+import tokentriage
+from tokentriage import Router, RouterConfig
 
 
 @pytest.fixture
-def mock_openai(monkeypatch):
-    """Mock OpenAI SDK and install patches."""
-    
-    mock_module = Mock()
-    mock_module.OpenAI = FakeOpenAI
-    mock_module.AsyncOpenAI = FakeAsyncOpenAI
-    
-    import sys
-    monkeypatch.setitem(sys.modules, "openai", mock_module)
-    
-    # Set up router
-    openai_sdk._State.router = Router(RouterConfig(), FixedClassifier(SIMPLE))
-    openai_sdk._State.patched = False
-    
-    # Install patches
-    openai_sdk.install(("openai",))
-    
-    yield mock_module
-    
-    # Cleanup
-    openai_sdk.uninstall()
+def sent(monkeypatch):
+    """(host, model) pairs the SDK actually sent, in order."""
+    calls: list[tuple[str, str]] = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        calls.append((request.url.host, body["model"]))
+        if body.get("stream"):
+            return httpx2.Response(200, text="data: [DONE]\n\n", headers={"content-type": "text/event-stream"},
+                                   request=request)
+        return httpx2.Response(200, request=request, json={
+            "id": "c1", "object": "chat.completion", "created": 0, "model": body["model"],
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "4"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}})
+
+    async def respond_async(self, request, **kwargs):
+        return respond(request)
+
+    monkeypatch.setattr(httpx2.Client, "send", lambda self, request, **kw: respond(request))
+    monkeypatch.setattr(httpx2.AsyncClient, "send", respond_async)
+    return calls
 
 
-def test_openai_sync_routing(mock_openai):
-    """Test synchronous routing with OpenAI SDK."""
-    client = mock_openai.OpenAI(api_key=KEY)
-    
-    response = client.chat.completions.create(
-        model="gpt-6-astra",
-        messages=[{"role": "user", "content": "Simple question"}]
-    )
-    
-    # Should have routed to luna (SIMPLE classifier)
-    assert response.model == "gpt-6-luna"
+def _enable(**cfg):
+    tokentriage.enable(router=Router(RouterConfig(**cfg), FixedClassifier(SIMPLE)), frameworks=("openai",))
 
 
-@pytest.mark.asyncio
-async def test_openai_async_routing(mock_openai):
-    """Test async routing with OpenAI SDK."""
-    client = mock_openai.AsyncOpenAI(api_key=KEY)
-    
-    response = await client.chat.completions.create(
-        model="gpt-6-astra",
-        messages=[{"role": "user", "content": "Simple question"}]
-    )
-    
-    assert response.model == "gpt-6-luna"
+def _ask(client, model="gpt-6-astra", **kw):
+    return client.chat.completions.create(model=model, messages=[{"role": "user", "content": "What is 2+2?"}], **kw)
 
 
-def test_openai_with_tools(mock_openai):
-    """Test routing with tool use."""
-    client = mock_openai.OpenAI(api_key=KEY)
-    
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get weather",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }
-    ]
-    
-    response = client.chat.completions.create(
-        model="gpt-6-astra",
-        messages=[{"role": "user", "content": "What's the weather?"}],
-        tools=tools
-    )
-    
-    assert response.model == "gpt-6-luna"
+def test_sync_create_is_routed_and_counted(sent):
+    _enable()
+    reply = _ask(openai.OpenAI(api_key="sk-test"))
+    assert sent == [("api.openai.com", "gpt-6-luna")] and reply.model == "gpt-6-luna"
+    stats = tokentriage.stats()
+    assert stats["calls"] == 1 and stats["by_model"] == {"gpt-6-luna": 1}
 
 
-def test_openai_no_routing_without_enable():
-    """Verify routing is inactive without enable()."""
-    openai_sdk._State.router = None
-    assert openai_sdk._State.router is None
+async def test_async_create_is_routed(sent):
+    _enable()
+    reply = await openai.AsyncOpenAI(api_key="sk-test").chat.completions.create(
+        model="gpt-6-astra", messages=[{"role": "user", "content": "What is 2+2?"}])
+    assert sent == [("api.openai.com", "gpt-6-luna")] and reply.model == "gpt-6-luna"
+
+
+def test_stream_is_routed(sent):
+    _enable()
+    _ask(openai.OpenAI(api_key="sk-test"), stream=True)
+    assert sent == [("api.openai.com", "gpt-6-luna")]
+
+
+def test_openrouter_endpoint_routes_within_the_vendor(sent):
+    _enable()
+    client = openai.OpenAI(api_key="sk-or-test", base_url="https://openrouter.ai/api/v1")
+    _ask(client, model="anthropic/claude-opus-5.5")
+    assert sent == [("openrouter.ai", "anthropic/claude-haiku-4.5")]
+
+
+def test_unknown_host_and_disable_leave_calls_alone(sent):
+    _enable()
+    _ask(openai.OpenAI(api_key="sk-test", base_url="https://llm-proxy.example.com/v1"))
+    tokentriage.disable()
+    assert not getattr(openai.resources.chat.completions.Completions.create, "__tokentriage__", False)
+    _ask(openai.OpenAI(api_key="sk-test"))
+    assert [m for _, m in sent] == ["gpt-6-astra", "gpt-6-astra"]
+
+
+def test_langchain_call_is_not_routed_twice(sent):
+    from langchain_openai import ChatOpenAI
+
+    tokentriage.enable(router=Router(RouterConfig(), FixedClassifier(SIMPLE)), frameworks=("langchain", "openai"))
+    ChatOpenAI(model="gpt-6-astra", api_key="sk-test").invoke("What is 2+2?")
+    assert [m for _, m in sent] == ["gpt-6-luna"] and tokentriage.stats()["calls"] == 1

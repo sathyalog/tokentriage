@@ -33,6 +33,9 @@ tokentriage.enable(tokentriage.RouterConfig.from_yaml("tokentriage.yaml"))
 | `timeout_s` | `1.5` | Seconds per decision. On timeout the heuristic decides that call. |
 | `block_on_load` | `False` | `False`: the first call starts loading lev in the background, and the heuristic routes until lev is ready |
 | `cache_size` | `1024` | Decisions cached, keyed by a SHA-256 of the request state |
+| `sticky_threads` | `True` | Keep a conversation on one model so the provider's prompt cache keeps working. The thread id comes from LangGraph's `thread_id` or `metadata={"tokentriage_thread": ...}`; a thread can move up a tier, never down |
+| `thread_ttl_s` | `300` | Seconds an idle conversation keeps its model; matches Anthropic's default prompt-cache lifetime (use `3600` with the 1-hour cache) |
+| `escalate_after_repeats` | `2` | When the latest question repeats this many earlier ones (rephrased, or "that's wrong, try again"), move up a tier, and one more per further repeat. `0` turns it off |
 | `max_state_chars` | `2000` | Characters of the user message sent to the classifier (start and end are kept) |
 
 ### Tiers and thresholds

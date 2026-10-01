@@ -3,7 +3,8 @@
     tokentriage check                 is the environment ready? (lev, device, provider packages, usage store)
     tokentriage usage [--live] ...    token usage and estimated cost for the last 24h
     tokentriage run -- <command>      run a program with routing enabled, without editing it
-    tokentriage openrouter refresh    update the OpenRouter model catalog (prices, input types)
+    tokentriage models refresh        update prices/capabilities and the model ids your API keys can use
+    tokentriage openrouter refresh    update the OpenRouter model catalog only (prices, input types)
     tokentriage eval run FILE ...     measure quality: routed vs configured model on your prompts (paid calls)
     tokentriage eval report ...       quality of routing from evaluated calls (last 24h)
 
@@ -182,6 +183,70 @@ def openrouter_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+# Provider -> (API key variable, models endpoint, header carrying the key). Each is listed only when its key is set.
+MODEL_LISTS = {
+    "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models?limit=1000", "x-api-key"),
+    "openai": ("OPENAI_API_KEY", "https://api.openai.com/v1/models", "Authorization"),
+    "gemini": ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", "x-goog-api-key"),
+    "groq": ("GROQ_API_KEY", "https://api.groq.com/openai/v1/models", "Authorization"),
+    "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com/models", "Authorization"),
+    "mistral": ("MISTRAL_API_KEY", "https://api.mistral.ai/v1/models", "Authorization"),
+    "xai": ("XAI_API_KEY", "https://api.x.ai/v1/models", "Authorization"),
+}
+
+
+def _list_models(url: str, header: str, key: str) -> list[str]:
+    import urllib.request
+
+    headers = {"User-Agent": "tokentriage", header: f"Bearer {key}" if header == "Authorization" else key}
+    if header == "x-api-key":
+        headers["anthropic-version"] = "2023-06-01"
+    ids: list[str] = []
+    while url:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as resp:
+            page = json.load(resp)
+        rows = page.get("data") or page.get("models") or []
+        ids += [str(r.get("id") or r.get("name", "")).removeprefix("models/") for r in rows]
+        url = ""
+        if page.get("has_more") and page.get("last_id"):  # Anthropic pagination
+            url = f"{MODEL_LISTS['anthropic'][1]}&after_id={page['last_id']}"
+    return sorted(i for i in ids if i)
+
+
+def models_cmd(args: argparse.Namespace) -> int:
+    """Refresh prices and capabilities (OpenRouter catalogue) and the model ids your keys can use."""
+    import os
+    import time as _time
+
+    from .providers import available_models_path
+
+    status = 0
+    try:
+        openrouter_cmd(args)
+    except Exception as exc:  # noqa: BLE001 - keep going: the per-provider lists are still useful
+        print(f"could not refresh the OpenRouter catalogue: {exc}", file=sys.stderr)
+        status = 1
+    available: dict[str, list[str]] = {}
+    for provider, (env, url, header) in MODEL_LISTS.items():
+        key = os.environ.get(env)
+        if not key:
+            print(f"  - {provider:<10} skipped ({env} not set)")
+            continue
+        try:
+            available[provider] = _list_models(url, header, key)
+            print(f"  ✓ {provider:<10} {len(available[provider])} models available to your key")
+        except Exception as exc:  # noqa: BLE001 - one provider failing must not stop the others
+            print(f"  ✗ {provider:<10} {type(exc).__name__}: {exc}", file=sys.stderr)
+            status = 1
+    if available:
+        path = available_models_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"fetched": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                                    "providers": available}, indent=1))
+        print(f"saved available models to {path}")
+    return status
+
+
 def eval_cmd(args: argparse.Namespace) -> int:
     import time as _time
 
@@ -282,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--mode", choices=["route", "eval"], help="sets TOKENTRIAGE_MODE for the program")
     r.add_argument("--backend", choices=["lev-local", "lev-http", "heuristic"], help="sets TOKENTRIAGE_BACKEND")
     r.add_argument("command_args", nargs=argparse.REMAINDER, help="-- the command to run")
+    m = sub.add_parser("models", help="keep model data current: prices, capabilities and the models your keys can use")
+    m.add_argument("action", choices=["refresh"], help="refresh: OpenRouter catalogue + each provider's model list")
     o = sub.add_parser("openrouter", help="OpenRouter catalog commands")
     o.add_argument("action", choices=["refresh"], help="refresh: download current models, prices and input types")
     ev = sub.add_parser("eval", help="evaluation: does the routed model hold up against the configured one?")
@@ -316,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_cmd(args)
     if args.command == "openrouter":
         return openrouter_cmd(args)
+    if args.command == "models":
+        return models_cmd(args)
     return check()
 
 

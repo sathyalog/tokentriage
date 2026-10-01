@@ -18,6 +18,7 @@ Guardrails applied here, before any model is swapped:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import fnmatch
 import functools
@@ -34,6 +35,7 @@ from ..providers import ALL_PROVIDERS, PROVIDER_CLASSES, TARGETS, Target, openro
 from ..router import Router
 from ..telemetry import Telemetry
 from ..tracing import CallTrace
+from ._sdk_common import ROUTED
 
 log = logging.getLogger("tokentriage")
 
@@ -148,7 +150,9 @@ def _plan(llm: Any, target: Target, args: tuple, kwargs: dict, stream: bool) -> 
 
     features = extract(messages, kwargs.get("tools"), kwargs.get("tool_choice"))
     _, max_out = _max_tokens(llm, target)
-    decision = _State.router.decide(provider, current, features, metadata.get("tokentriage_tier"), max_out)
+    thread = metadata.get("tokentriage_thread") or metadata.get("thread_id")  # LangGraph adds thread_id
+    decision = _State.router.decide(provider, current, features, metadata.get("tokentriage_tier"), max_out,
+                                    thread=str(thread) if thread else None)
     routed_model = decision.model
     routed_updates = _compat_updates(provider, llm, target, routed_model)
 
@@ -229,6 +233,45 @@ def _finish(trace: CallTrace, usage: dict | None, error: BaseException | None = 
 # -- wrappers ----------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _sdk_layer_off():
+    """The provider SDK call LangChain makes here was already decided at this layer."""
+    token = ROUTED.set(True)
+    try:
+        yield
+    finally:
+        try:
+            ROUTED.reset(token)
+        except ValueError:  # resumed in another context; just clear the flag there
+            ROUTED.set(False)
+
+
+def _sdk_off_iter(gen):
+    try:
+        while True:
+            with _sdk_layer_off():
+                try:
+                    item = next(gen)
+                except StopIteration:
+                    return
+            yield item
+    finally:
+        gen.close()
+
+
+async def _sdk_off_aiter(agen):
+    try:
+        while True:
+            with _sdk_layer_off():
+                try:
+                    item = await agen.__anext__()
+                except StopAsyncIteration:
+                    return
+            yield item
+    finally:
+        await agen.aclose()
+
+
 def _wrap(target: Target, name: str, orig: Any) -> Any:
     if name == "_generate":
 
@@ -236,11 +279,13 @@ def _wrap(target: Target, name: str, orig: Any) -> Any:
         def _generate(self, *args, **kwargs):
             plan = _plan(self, target, args, kwargs, stream=False)
             if plan is None:
-                return orig(self, *args, **kwargs)
+                with _sdk_layer_off():
+                    return orig(self, *args, **kwargs)
             routed, trace, ev = plan
             _State.in_flight.add(id(routed))
             try:
-                result = orig(routed, *args, **kwargs)
+                with _sdk_layer_off():
+                    result = orig(routed, *args, **kwargs)
             except BaseException as exc:
                 _finish(trace, None, exc)
                 raise
@@ -258,11 +303,13 @@ def _wrap(target: Target, name: str, orig: Any) -> Any:
         async def _agenerate(self, *args, **kwargs):
             plan = _plan(self, target, args, kwargs, stream=False)
             if plan is None:
-                return await orig(self, *args, **kwargs)
+                with _sdk_layer_off():
+                    return await orig(self, *args, **kwargs)
             routed, trace, ev = plan
             _State.in_flight.add(id(routed))
             try:
-                result = await orig(routed, *args, **kwargs)
+                with _sdk_layer_off():
+                    result = await orig(routed, *args, **kwargs)
             except BaseException as exc:
                 _finish(trace, None, exc)
                 raise
@@ -280,7 +327,7 @@ def _wrap(target: Target, name: str, orig: Any) -> Any:
         def _stream(self, *args, **kwargs):
             plan = _plan(self, target, args, kwargs, stream=True)
             if plan is None:
-                yield from orig(self, *args, **kwargs)
+                yield from _sdk_off_iter(orig(self, *args, **kwargs))
                 return
             routed, trace, ev = plan
             usage: dict = {}
@@ -289,7 +336,7 @@ def _wrap(target: Target, name: str, orig: Any) -> Any:
             full = None
             _State.in_flight.add(id(routed))
             try:
-                for chunk in orig(routed, *args, **kwargs):
+                for chunk in _sdk_off_iter(orig(routed, *args, **kwargs)):
                     if first:
                         chunk.message.response_metadata["tokentriage"] = _meta(trace)
                         first = False
@@ -313,7 +360,7 @@ def _wrap(target: Target, name: str, orig: Any) -> Any:
     async def _astream(self, *args, **kwargs):
         plan = _plan(self, target, args, kwargs, stream=True)
         if plan is None:
-            async for chunk in orig(self, *args, **kwargs):
+            async for chunk in _sdk_off_aiter(orig(self, *args, **kwargs)):
                 yield chunk
             return
         routed, trace, ev = plan
@@ -323,7 +370,7 @@ def _wrap(target: Target, name: str, orig: Any) -> Any:
         full = None
         _State.in_flight.add(id(routed))
         try:
-            async for chunk in orig(routed, *args, **kwargs):
+            async for chunk in _sdk_off_aiter(orig(routed, *args, **kwargs)):
                 if first:
                     chunk.message.response_metadata["tokentriage"] = _meta(trace)
                     first = False

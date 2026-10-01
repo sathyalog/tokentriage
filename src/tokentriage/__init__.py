@@ -46,6 +46,7 @@ __all__ = [
     "usage",
     "usage_report",
     "warmup",
+    "reset_thread",
     "load_config",
     "setup_interactive",
 ]
@@ -139,15 +140,13 @@ def enable(
         elif framework == "anthropic":
             from .integrations import anthropic_sdk
             installed.extend(anthropic_sdk.install(providers))
-            anthropic_sdk._State.router = _lc._State.router
         elif framework == "openai":
             from .integrations import openai_sdk
             installed.extend(openai_sdk.install(providers))
-            openai_sdk._State.router = _lc._State.router
         else:
             raise ValueError(f"Unknown framework: {framework}. Choose from: langchain, anthropic, openai")
-    
-    return installed
+
+    return list(dict.fromkeys(installed))
 
 
 def route(llm: M, config: RouterConfig | None = None, *, router: Router | None = None) -> M:
@@ -179,6 +178,10 @@ def exclude(llm: Any) -> Any:
 
 def disable() -> None:
     """Restore the original chat model methods and stop the live usage socket."""
+    from .integrations import anthropic_sdk, openai_sdk
+
+    anthropic_sdk.uninstall()
+    openai_sdk.uninstall()
     _lc.uninstall()
     _teardown_usage()
 
@@ -216,6 +219,12 @@ def eval_report(since: str | None = "24h", by: str = "tier", user: str | None = 
 def usage_report(since: str | None = "24h", by: str = "model", user: str | None = None, task: str | None = None) -> str:
     """usage() as a printable table."""
     return _usage.format_table(usage(since, by, user, task), title=f"tokentriage usage, last {since or '24h'} (this process)")
+
+
+def reset_thread(thread_id: str) -> None:
+    """Forget the model a conversation is kept on (e.g. after trimming or summarising its history)."""
+    if _lc._State.router is not None:
+        _lc._State.router.forget_thread(str(thread_id))
 
 
 def warmup() -> None:

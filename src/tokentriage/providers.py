@@ -8,6 +8,8 @@ Prices are USD per 1M tokens (input, output) and only feed the savings estimate.
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 import os
 import re
@@ -193,6 +195,11 @@ def openrouter_catalog_path() -> Path:
     return Path(home).expanduser() / "openrouter_models.json"
 
 
+def available_models_path() -> Path:
+    """Model ids each provider's API reported for your key, written by `tokentriage models refresh`."""
+    return openrouter_catalog_path().with_name("available_models.json")
+
+
 @lru_cache(maxsize=1)
 def openrouter_catalog() -> dict[str, dict]:
     """OpenRouter models: the refreshed user copy if present, else the snapshot shipped with the package."""
@@ -278,12 +285,28 @@ def _catalog_spec(model: str) -> ModelSpec | None:
                      forced_tools=full.split(":", 1)[0] not in NO_FORCED_TOOLS)
 
 
+# Direct provider -> its vendor prefix in the OpenRouter catalogue, used for models newer than the built-in list.
+CATALOG_VENDOR_OF = {"anthropic": "anthropic", "openai": "openai", "gemini": "google", "xai": "x-ai",
+                     "mistral": "mistralai", "deepseek": "deepseek"}
+
+
 def spec_for(provider: str, model: str) -> ModelSpec | None:
-    """Capabilities and prices of a model, understanding dated ids and OpenRouter slugs."""
+    """Capabilities and prices of a model, understanding dated ids and OpenRouter slugs.
+
+    Direct providers use the built-in list first, then the OpenRouter catalogue (refreshed by
+    `tokentriage models refresh`), so new models still get prices and guardrail checks.
+    """
     if provider == "openrouter":
         return _catalog_spec(model)
     spec = PROVIDERS.get(provider)
-    return spec.spec(canonical_id(model)) if spec else None
+    found = spec.spec(canonical_id(model)) if spec else None
+    vendor = CATALOG_VENDOR_OF.get(provider)
+    if found is None and vendor and model:
+        full = openrouter_full_id(canonical_id(model))
+        if full.startswith(vendor + "/"):
+            entry = _catalog_spec(full)
+            found = dataclasses.replace(entry, id=model) if entry else None
+    return found
 
 
 def price_of(model: str) -> tuple[float, float] | None:

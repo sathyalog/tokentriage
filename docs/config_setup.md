@@ -4,12 +4,12 @@ Enable tokentriage for your entire project with a single configuration file—no
 
 > **New in v0.1.0+:** `load_config()` now does everything automatically:
 > - ✅ Validates LEV prerequisites with helpful installation guide
-> - ✅ Downloads 9.2GB LEV model (first run only, 5-10 min)
+> - ✅ Downloads the lev model (~9.5 GB, first run only) with a progress percentage, and waits until it is complete
 > - ✅ Tests LEV with sample classification
 > - ✅ Enables routing for all configured frameworks
 > - ✅ Falls back gracefully to heuristic if LEV unavailable
 >
-> See [README.md#What's New](../README.md#whats-new-in-v010) for details.
+> See the [README](../README.md) for the full setup.
 
 ## Quick Start
 
@@ -175,10 +175,12 @@ tokentriage.load_config()  # Mounts from /etc/config/tokentriage.yaml
 3. **Environment variables** (`TOKENTRIAGE_*`)
 4. **Defaults** (lev-local backend, LangChain framework)
 
-### Example: Override Backend via Environment
+### Environment variables only fill gaps
+
+`TOKENTRIAGE_*` variables apply to settings the config file leaves out; **a value in `tokentriage.yaml` wins over the environment**. To use a different backend in production, keep it out of the shared file (or use a separate file, `load_config("tokentriage.prod.yaml")`):
 
 ```bash
-# Config file says lev-local, but override to heuristic in production
+# tokentriage.yaml does not set router.backend, so the variable applies
 export TOKENTRIAGE_BACKEND=heuristic
 python myapp.py
 ```

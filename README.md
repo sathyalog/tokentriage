@@ -10,9 +10,17 @@
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-2a78d6?style=flat-square)
 [![Powered by lev](https://img.shields.io/badge/powered%20by-lev%20·%20InterfazeAI-14181f?style=flat-square)](https://github.com/InterfazeAI/lev)
 
-> **🧪 Beta: still under active testing.** Settings, defaults and APIs may change between commits, and some integrations are incomplete (see [Framework support](#framework-support) and [Known limitations](#known-limitations)). Try it in development or with evaluation mode before relying on it in production, and please [report issues](https://github.com/sathyalog/tokentriage/issues).
+> **🧪 Beta: still under active testing.** Settings, defaults and APIs may change between commits, and some parts are incomplete (see [Known limitations](#known-limitations)). Try it in development or with evaluation mode before relying on it in production, and please [report issues](https://github.com/sathyalog/tokentriage/issues).
 
 **tokentriage leverages LEV—a fast, System 1 decision engine—to evaluate prompt complexity and predict the cheapest suitable model in milliseconds without the latency of generative text models.** You keep writing `ChatAnthropic(model="claude-opus-5-5")`. tokentriage checks each request, and a greeting goes to Haiku while a hard reasoning task stays on Opus. Your code doesn't change and nothing is proxied: the decision happens inside your process, and the call still goes straight to your provider with your own API key.
+
+**Key features**
+- **One line to adopt:** `tokentriage.load_config()` routes LangChain chat models and direct Anthropic SDK / OpenAI SDK calls.
+- **Same provider, your keys:** routing only moves between tiers of the provider you already use (cross-vendor is [opt-in via OpenRouter](#switching-vendors-with-openrouter-ladder-mode)). [Security details](docs/security.md).
+- **Conversation-aware:** keeps each conversation on one model so prompt caching keeps working, and moves it to a better model when the user keeps re-asking the same question. [Details](docs/conversations.md).
+- **Guardrails:** never picks a model that can't fit the request's context, attachments or tool use, and never touches fine-tuned models. [Rules](docs/security.md#guardrails).
+- **Current model data:** `tokentriage models refresh` updates prices and capabilities and checks your tier models against what your API key can use. [Details](docs/models.md).
+- **Visible costs:** every decision is logged with its cost and savings; `tokentriage usage` and evaluation mode show the totals and the quality. [Logs and usage](docs/observability.md), [evaluation](docs/evaluation.md).
 
 ---
 
@@ -32,7 +40,7 @@ Instead of using a full generative LLM to classify user requests, `tokentriage` 
 | standard | `claude-sonnet-5` | `gpt-6-sol` |
 | complex | `claude-opus-5-5` | `gpt-6-astra` |
 
-Tiers are configurable per provider (see [Configuration](#configuration)).
+Tiers are configurable per provider (see [Configuration](#configuration)). Before using a cheaper model, tokentriage checks that it fits the request's context size, attachments and tool use; the rules are in [docs/security.md](docs/security.md#guardrails).
 
 ### Choosing a classifier backend
 
@@ -209,6 +217,17 @@ llm = ChatAnthropic(model="claude-sonnet-5")
 llm.invoke("What is 2+2?")   # routed, e.g. to claude-haiku-4-5
 ```
 
+Calling the Anthropic or OpenAI SDK directly? Add the framework in `tokentriage.yaml` and keep your code as it is:
+
+```yaml
+frameworks: [langchain, anthropic, openai]
+```
+
+```python
+client = anthropic.Anthropic()
+client.messages.create(model="claude-opus-5-5", max_tokens=500, messages=[...])   # routed the same way
+```
+
 **3. Run your app.**
 
 ```bash
@@ -246,7 +265,7 @@ If lev can't be installed, downloaded or loaded, `load_config()` says why and ro
 
 ## Configuration
 
-`tokentriage.yaml` is found in the current directory or up to five parent directories (`tokentriage.yml`, `tokentriage.toml`, `.tokentriage`, or `[tool.tokentriage]` in `pyproject.toml` also work).
+`tokentriage.yaml` is found in the current directory or up to five parent directories (`tokentriage.yml`, `tokentriage.toml`, `.tokentriage`, or `[tool.tokentriage]` in `pyproject.toml` also work). Every setting is listed in [docs/configuration.md](docs/configuration.md); TOML and environment-variable setups are in [docs/config_setup.md](docs/config_setup.md).
 
 ```yaml
 enabled: true                 # false: load_config() does nothing (no routing)
@@ -260,6 +279,9 @@ router:
   log_level: INFO             # DEBUG shows the reason for each decision
   usage_file: true            # keep ~/.tokentriage/usage (last 24h)
   usage_live: true            # answer `tokentriage usage --live` while the app runs
+  sticky_threads: true        # keep each conversation on one model (see below)
+  thread_ttl_s: 300           # idle seconds before a conversation may change model again
+  escalate_after_repeats: 2   # a question asked again twice more moves up a tier; 0 = off
 
 models:                       # override tier models; unlisted tiers keep the defaults
   simple:
@@ -267,7 +289,7 @@ models:                       # override tier models; unlisted tiers keep the de
   complex:
     providers: [anthropic/claude-opus-5-5, openai/gpt-6-astra]
 
-frameworks: [langchain]       # what to patch (default: langchain)
+frameworks: [langchain, anthropic, openai]   # what to patch (default: langchain)
 providers: [anthropic]        # only route these providers (default: all installed)
 ```
 
@@ -309,6 +331,31 @@ router:
 - **Authentication.** `lev serve` has no authentication of its own. tokentriage sends `Authorization: Bearer $TOKENTRIAGE_LEV_API_KEY`, so put the server behind something that checks that header (a reverse proxy, or a private Hugging Face Space with an HF token as the key).
 - **Redaction.** Personal data is redacted from the text sent to a lev-http server by default (`redact_classifier_input: true`).
 
+The full endpoint rules and what leaves your process: [docs/security.md](docs/security.md#lev-http-endpoint-rules).
+
+### One model per conversation (`sticky_threads`)
+
+Switching models mid-conversation throws away the provider's prompt cache (cached input costs about 10% of the normal price), so tokentriage keeps each conversation on **one model**. A conversation can move **up** a tier, never down.
+
+- **Thread id:** LangGraph's `thread_id` is used automatically. Otherwise pass `config={"metadata": {"tokentriage_thread": conversation_id}}`. Calls without one are routed one by one.
+- **Re-asked questions move up:** the **3rd time** the same question is asked (rephrased, or "that's wrong, try again"), the conversation moves up a tier, and again on each further repeat. "thanks" or "ok" never count. Works with or without a thread id.
+- **Switch by hand:** for one call, `metadata={"tokentriage_tier": "complex"}` sets the tier and `metadata={"tokentriage_disable": True}` uses your own model. `tokentriage.reset_thread(conversation_id)` starts over.
+- **Settings:** `sticky_threads` (default on), `thread_ttl_s` (default 300 s, Anthropic's default cache lifetime; use 3600 with the 1-hour cache), `escalate_after_repeats` (default 2; 0 turns it off).
+
+Cost example and detection rules: [docs/conversations.md](docs/conversations.md).
+
+### Keeping models up to date
+
+```bash
+tokentriage models refresh
+```
+
+- **Prices and capabilities:** downloads current data for ~200 models (OpenRouter's public catalogue). New models, e.g. a new `claude-opus-4-8`, then get prices and guardrail checks, and dated ids like `claude-sonnet-4-5-20250929` match their undated name.
+- **Models your key can use:** for each provider whose API key is set, saves the list of available models. `load_config()` then warns when a tier model isn't available and suggests the newest of its family, e.g. `'claude-sonnet-5' … (newest similar: 'claude-sonnet-5-5')`. Startup makes no network calls.
+- **You stay in control:** tier models never change on their own; set them under `models:`.
+
+Run it weekly or in CI. More: [docs/models.md](docs/models.md).
+
 ### Switching vendors with OpenRouter (ladder mode)
 
 By default tokentriage stays with the vendor in your code: an Anthropic model on OpenRouter is only routed between Anthropic models. Turn on **ladder mode** to let it pick, for each request, the **cheapest model among the vendors you allow** that fits the request's context size, attachments and tool use:
@@ -326,7 +373,7 @@ With that config, a simple request sent to `anthropic/claude-opus-5.5` can be an
 - **Keep in mind:**
   - Your prompt may go to a different company than the one in your code, so list only vendors you're allowed to use.
   - Answers can differ in style between vendors. Try it with [evaluation mode](docs/evaluation.md) first.
-- **Other settings:** vendor tier models can be changed under `models:` with `openrouter/<vendor>/<model>` entries, or `tokentriage setup` can set up ladder mode for you.
+- **Other settings:** vendor tier models can be changed under `models:` with `openrouter/<vendor>/<model>` entries, or `tokentriage setup` can set up ladder mode for you. All OpenRouter settings: [docs/configuration.md](docs/configuration.md).
 
 ---
 
@@ -340,7 +387,7 @@ tokentriage usage --live             # in-memory numbers from running apps
 tokentriage usage --json
 ```
 
-In code: `tokentriage.stats()`, `tokentriage.usage()`, `tokentriage.usage_report()`.
+In code: `tokentriage.stats()`, `tokentriage.usage()`, `tokentriage.usage_report()`. Log lines, OpenTelemetry, how the 24-hour files and live view work, and running under Docker or Kubernetes: [docs/observability.md](docs/observability.md).
 
 To check routing quality before trusting it, **evaluation mode** also runs the configured model on a sample of calls and has a judge compare the answers. See [docs/evaluation.md](docs/evaluation.md) and `tokentriage eval --help`.
 
@@ -351,8 +398,11 @@ To check routing quality before trusting it, **evaluation mode** also runs the c
 | Framework | Status |
 |-----------|--------|
 | LangChain chat models (`ChatAnthropic`, `ChatOpenAI`, `ChatGoogleGenerativeAI`, `ChatGroq`, `ChatDeepSeek`, `ChatMistralAI`, `ChatXAI`, `ChatHuggingFace`, `ChatOpenRouter`) | ✅ Routed: `invoke`, `stream`, async, `bind_tools`, `with_structured_output`, chains |
-| Anthropic SDK / OpenAI SDK (`frameworks: [anthropic, openai]`) | ⚠️ **Not routing yet.** Calls go to the configured model unchanged; a fix is in progress. |
-| Llama Index | ⚠️ Depends on the SDK integrations above, so not routing yet. |
+| Anthropic SDK (`frameworks: [anthropic]`) | ✅ Routed: `client.messages.create`, `.stream`, `.parse`, sync and async, including clients created before `load_config()` |
+| OpenAI SDK (`frameworks: [openai]`) | ✅ Routed: `client.chat.completions.create`, `.stream`, `.parse`, sync and async. Also for OpenAI-compatible endpoints the client points at (OpenRouter, Groq, DeepSeek, xAI, Mistral, Gemini), always within that provider's models |
+| Llama Index | Routed through the Anthropic and OpenAI SDK integrations above (not tested with Llama Index itself) |
+
+With both LangChain and an SDK framework enabled, a LangChain call is routed once, at the LangChain layer; the SDK call it makes underneath isn't routed again. Using Llama Index? See [docs/llama_index.md](docs/llama_index.md).
 
 Never routed: embeddings, fine-tuned or custom models (`ft:*` and others in `never_route`), and OpenRouter's own routers or `:free` models.
 
@@ -366,12 +416,15 @@ Never routed: embeddings, fine-tuned or custom models (`ft:*` and others in `nev
 - **A timed-out lev decision keeps running in the background.** The call it belonged to has already fallen back, but decisions run one at a time, so the next calls may wait behind it and also fall back. On a machine that is too slow for lev, expect most calls to use the heuristic.
 - **Environment variables don't override the YAML.** `TOKENTRIAGE_*` variables apply only to settings the YAML leaves out. Also, `tokentriage run -- <command>` reads only environment variables, not `tokentriage.yaml`.
 - **lev is installed from its GitHub main branch**, so a new lev commit can change behaviour. For reproducible installs, pin lev to a commit (`...lev.git@<commit>#subdirectory=packages/lev`).
-- **Default tier models are built in** (see [How it works](#how-it-works)). If a provider retires one of those ids, calls to that tier fail. Override it under `models:` until tokentriage is updated.
+- **Default tier models are built in** (see [How it works](#how-it-works)). If a provider retires one of those ids, calls to that tier fail. `tokentriage models refresh` makes `load_config()` warn about this; fix it under `models:`.
+- **Streamed SDK calls aren't counted in usage yet.** Streams through the Anthropic and OpenAI SDK integrations are routed and logged, but their tokens and cost don't reach `tokentriage usage`. LangChain streams are counted.
 - **Startup output is printed with `print()`,** not logging, so it can't be silenced through `log_level`. Importing tokentriage without lev installed also prints a long install guide.
 
 ---
 
 ## Troubleshooting
+
+Getting a 401 "API key is invalid" error? See [docs/troubleshooting-401-auth.md](docs/troubleshooting-401-auth.md).
 
 **`lev-local classifier failed (timeout)`**
 lev took longer than `timeout_s`, so that call used the heuristic. On a CPU a decision can take seconds; with too little memory it can take minutes (see the lev-local memory note above). Run on a GPU or a machine with more RAM, use `lev-http`, or raise `timeout_s` if your decisions are only slightly slow.
@@ -398,10 +451,14 @@ lev isn't installed. Install it (see [Installation](#installation)), or use `bac
 | Topic | Link |
 |-------|------|
 | All settings and per-call control | [docs/configuration.md](docs/configuration.md) |
+| Conversations: sticky models, re-asked questions | [docs/conversations.md](docs/conversations.md) |
+| Keeping model data current | [docs/models.md](docs/models.md) |
 | Logging, OpenTelemetry, usage store | [docs/observability.md](docs/observability.md) |
-| PII redaction and safety rules | [docs/security.md](docs/security.md) |
+| Security, PII redaction, guardrails, lev-http rules | [docs/security.md](docs/security.md) |
 | Evaluation mode | [docs/evaluation.md](docs/evaluation.md) |
-| Docker / Kubernetes / environment setup | [docs/config_setup.md](docs/config_setup.md) |
+| Config file formats, precedence, load anywhere | [docs/config_setup.md](docs/config_setup.md) |
+| Llama Index | [docs/llama_index.md](docs/llama_index.md) |
+| 401 authentication errors | [docs/troubleshooting-401-auth.md](docs/troubleshooting-401-auth.md) |
 
 To try routing decisions without API keys: `python examples/demo.py --backend heuristic` (or `--backend lev-local`).
 

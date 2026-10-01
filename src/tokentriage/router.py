@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from .classifiers.heuristic import HeuristicClassifier
 from .config import TIERS, RouterConfig, Tier
 from .features import RequestFeatures
 from .providers import canonical_id, openrouter_vendor, price_of, same_model, spec_for
+from .repeats import repeat_count
 
 log = logging.getLogger("tokentriage")
 
@@ -90,6 +92,8 @@ class Router:
         self._cache: OrderedDict[str, Signals] = OrderedDict()
         self._lock = threading.Lock()
         self._warned: set[str] = set()
+        # thread id -> (tier, expiry on time.monotonic()), newest last
+        self._threads: OrderedDict[str, tuple[Tier, float]] = OrderedDict()
 
     # -- signals ---------------------------------------------------------------
 
@@ -161,8 +165,10 @@ class Router:
         features: RequestFeatures,
         override_tier: str | None = None,
         max_output_tokens: int | None = None,
+        thread: str | None = None,
     ) -> Decision:
         cfg = self.config
+        sticky = bool(thread) and cfg.sticky_threads
         tiers, note = self.tiers_for(provider, current_model, features)
         if not tiers:
             return Decision(provider, "standard", current_model, current_model, note)
@@ -177,6 +183,21 @@ class Router:
         if cfg.min_tier and TIERS.index(tier) < TIERS.index(cfg.min_tier):
             why += f"; raised to min_tier {cfg.min_tier}"
             tier = cfg.min_tier
+
+        if sticky and override_tier is None:
+            earlier = self._thread_tier(thread)
+            if earlier and TIERS.index(earlier) > TIERS.index(tier):
+                why += f"; sticky thread: kept {earlier}"
+                tier = earlier
+
+        if cfg.escalate_after_repeats and override_tier is None:
+            repeats = repeat_count(features)
+            if repeats >= cfg.escalate_after_repeats:
+                steps = repeats - cfg.escalate_after_repeats + 1
+                higher = TIERS[min(TIERS.index(tier) + steps, len(TIERS) - 1)]
+                if higher != tier:
+                    why += f"; asked {repeats + 1} times: moved up to {higher}"
+                    tier = higher
 
         model = tiers[tier]
         if cfg.capability_guard:
@@ -198,7 +219,35 @@ class Router:
             model = current_model  # same model: keep the exact id the app pinned (dated, or OpenRouter bare name)
         if provider == "openrouter" and openrouter_vendor(model) != openrouter_vendor(current_model):
             why += f"; ladder: {openrouter_vendor(current_model)} -> {openrouter_vendor(model)}"
+        if sticky:
+            self._remember_thread(thread, tier)
         return Decision(provider, tier, model, current_model, why, signals, cached)
+
+    # -- threads ---------------------------------------------------------------
+
+    _MAX_THREADS = 10_000
+
+    def _thread_tier(self, thread: str) -> Tier | None:
+        with self._lock:
+            entry = self._threads.get(thread)
+            if entry is None:
+                return None
+            if time.monotonic() >= entry[1]:
+                del self._threads[thread]
+                return None
+            return entry[0]
+
+    def forget_thread(self, thread: str) -> None:
+        """The next call in this thread is decided fresh."""
+        with self._lock:
+            self._threads.pop(thread, None)
+
+    def _remember_thread(self, thread: str, tier: Tier) -> None:
+        with self._lock:
+            self._threads[thread] = (tier, time.monotonic() + self.config.thread_ttl_s)
+            self._threads.move_to_end(thread)
+            while len(self._threads) > self._MAX_THREADS:
+                self._threads.popitem(last=False)
 
     @staticmethod
     def _problems(spec, features: RequestFeatures, need_ctx: int) -> list[str]:

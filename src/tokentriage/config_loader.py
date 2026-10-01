@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -192,6 +194,42 @@ def _trigger_lev_download(checkpoint: str = "interfaze-ai/lev") -> bool:
         return False
 
 
+def _family_newest(model: str, available: list[str]) -> str | None:
+    """Newest available id with the same name words, e.g. claude-sonnet-5 -> claude-sonnet-5-5."""
+    from .providers import canonical_id
+
+    def words(mid: str) -> set[str]:
+        return {w for w in canonical_id(mid).split("-") if w and not w.isdigit()}
+
+    def version(mid: str) -> tuple[int, ...]:
+        return tuple(int(n) for n in re.findall(r"\d+", canonical_id(mid)))
+
+    same = [m for m in available if words(m) == words(model)]
+    return max(same, key=version) if same else None
+
+
+def _check_tier_models(cfg: RouterConfig) -> None:
+    """Warn about tier models your API key can't use, per the last `tokentriage models refresh`.
+
+    Reads a local file only: no network at startup, and never blocks.
+    """
+    from .providers import available_models_path, canonical_id
+
+    try:
+        providers = json.loads(available_models_path().read_text())["providers"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    for provider, ids in providers.items():
+        known = {canonical_id(i) for i in ids} | set(ids)
+        for tier, model in (cfg.tiers.get(provider) or {}).items():
+            if model in known or canonical_id(model) in known:
+                continue
+            hint = _family_newest(model, ids)
+            print(f"⚠️  tokentriage: {provider} {tier} tier uses {model!r}, which isn't in the models your "
+                  f"{provider} key can use" + (f" (newest similar: {hint!r})" if hint else "")
+                  + ". Set it under `models:` in tokentriage.yaml, or run `tokentriage models refresh`.")
+
+
 def _models_to_tiers(models: dict) -> tuple[dict, dict]:
     """`models: {simple: {providers: ["anthropic/claude-haiku-4-5"]}}` -> (tiers, openrouter_families).
 
@@ -278,6 +316,8 @@ def load_config(config_path: str | None = None, prefix: str = "TOKENTRIAGE_", au
     if not enabled:
         print("tokentriage: disabled in config (enabled: false); calls are not routed")
         return cfg, frameworks, providers
+
+    _check_tier_models(cfg)
 
     # If lev-local backend is configured, trigger model download
     if auto_enable and cfg.backend == "lev-local":

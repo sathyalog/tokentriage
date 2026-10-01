@@ -73,6 +73,8 @@ class RequestFeatures:
     pdfs: int = 0
     # The request forces a tool call (with_structured_output, tool_choice="any"/named tool).
     forced_tool: bool = False
+    # Earlier user messages in this request (newest last, up to 10), to notice a question asked again.
+    earlier_user: tuple[str, ...] = ()
 
     @property
     def has_images(self) -> bool:
@@ -131,7 +133,7 @@ def extract_generic(
 
     Each dict should have: {"role": "...", "content": "...", "tool_calls": ...?}
     """
-    system, last_user = [], ""
+    system, last_user, user_texts = [], "", []
     attachments: Counter = Counter()
     turns = tool_results = total_chars = pdfs = 0
 
@@ -153,6 +155,7 @@ def extract_generic(
             system.append(text)
         elif role == "user":
             last_user = text
+            user_texts.append(text)
             turns += 1
         elif role == "assistant":
             turns += 1
@@ -169,6 +172,7 @@ def extract_generic(
         total_chars=total_chars,
         pdfs=pdfs,
         forced_tool=bool(tools) and is_forced_tool_choice(tool_choice),
+        earlier_user=tuple(t for t in user_texts[:-1] if t.strip())[-10:],
     )
 
 

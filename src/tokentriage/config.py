@@ -52,6 +52,14 @@ class RouterConfig:
     # routes with the heuristic until it is ready, instead of blocking the app.
     block_on_load: bool = False
     cache_size: int = 1024
+    # Keep one conversation on one model so the provider's prompt cache keeps working: a thread
+    # (LangGraph thread_id, or metadata={"tokentriage_thread": ...}) can move up a tier, never down.
+    sticky_threads: bool = True
+    # Idle seconds before a thread may change model again: Anthropic's default prompt-cache lifetime
+    # (set 3600 when using the 1-hour cache).
+    thread_ttl_s: int = 300
+    # Asked again this many times (rephrased, or "that's wrong, try again"): move up a tier; 0 = off.
+    escalate_after_repeats: int = 2
     max_state_chars: int = 2000
 
     # -- guardrails -------------------------------------------------------------
