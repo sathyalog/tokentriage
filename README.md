@@ -3,7 +3,7 @@
 # tokentriage
 (Open-Source LLM Cost Router)
 
-*Powered by [lev](https://github.com/InterfazeAI/lev), the decision model from InterfazeAI. Many thanks to Abhinav and the Interfaze team for developing lev. tokentriage is an independent project built on top of it.*
+*Powered by [LEV](https://github.com/InterfazeAI/lev), a System 1 decision model from InterfazeAI. Many thanks to Abhinav and the Interfaze team for developing lev. tokentriage is an independent project built on top of it.*
 
 ![Status: beta](https://img.shields.io/badge/status-beta-orange?style=flat-square)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE)
@@ -12,11 +12,14 @@
 
 > **🧪 Beta: still under active testing.** Settings, defaults and APIs may change between commits, and some integrations are incomplete (see [Framework support](#framework-support) and [Known limitations](#known-limitations)). Try it in development or with evaluation mode before relying on it in production, and please [report issues](https://github.com/sathyalog/tokentriage/issues).
 
-**tokentriage sends each LLM call to the cheapest model from the same provider that can handle it.** You keep writing `ChatAnthropic(model="claude-opus-5-5")`. tokentriage checks each request, and a greeting goes to Haiku while a hard reasoning task stays on Opus. Your code doesn't change and nothing is proxied: the decision happens inside your process, and the call still goes straight to your provider with your own API key.
+**tokentriage leverages LEV—a fast, System 1 decision engine—to evaluate prompt complexity and predict the cheapest suitable model in milliseconds without the latency of generative text models.** You keep writing `ChatAnthropic(model="claude-opus-5-5")`. tokentriage checks each request, and a greeting goes to Haiku while a hard reasoning task stays on Opus. Your code doesn't change and nothing is proxied: the decision happens inside your process, and the call still goes straight to your provider with your own API key.
 
 ---
 
 ## How it works
+`tokentriage` intercepts outgoing chat model requests before they hit an external API. 
+
+Instead of using a full generative LLM to classify user requests, `tokentriage` offloads routing decisions to LEV (a 4B System 1 classifier). LEV computes probabilities over decision tiers in a single forward pass with zero token-generation overhead.
 
 1. You call a LangChain chat model as usual.
 2. tokentriage builds a short summary of the request: the last user message, the system prompt, tools and attachments.
