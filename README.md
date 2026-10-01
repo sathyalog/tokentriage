@@ -1,6 +1,6 @@
 [![tokentriage: per-request LLM model routing](assets/hero.png)](assets/hero.png)
 
-# tokentriage
+# tokentriage(Open-Source LLM Cost Router)
 
 *Powered by [lev](https://github.com/InterfazeAI/lev), the decision model from InterfazeAI. Many thanks to Abhinav and the Interfaze team for developing lev. tokentriage is an independent project built on top of it.*
 
