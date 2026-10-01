@@ -1,7 +1,7 @@
 """Loaded by Python at interpreter start-up when `tokentriage run` puts this folder on PYTHONPATH.
 
-Enables tokentriage in a program without editing it; configuration comes from TOKENTRIAGE_*
-environment variables. Any sitecustomize the environment already had is still run.
+Enables tokentriage in a program without editing it; settings come from tokentriage.yaml and the
+TOKENTRIAGE_ENABLED / _BACKEND / _MODE / _LOG_LEVEL variables. Any sitecustomize the environment already had is still run.
 """
 
 import os

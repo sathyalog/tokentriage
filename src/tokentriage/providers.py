@@ -2,7 +2,7 @@
 point at, and the cheapest -> most capable model ladder inside that provider.
 
 Model ids and prices were checked against each provider's docs in September 2026.
-They change often: override any tier with RouterConfig(tiers=...) or TOKENTRIAGE_<PROVIDER>_<TIER>.
+They change often: override any tier with `models:` in tokentriage.yaml or RouterConfig(tiers=...).
 Prices are USD per 1M tokens (input, output) and only feed the savings estimate.
 """
 

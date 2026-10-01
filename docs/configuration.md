@@ -1,7 +1,8 @@
 # Configuration
 
 Pass a `RouterConfig` to `tokentriage.enable()` or `tokentriage.route()`. If you pass none, `enable()` builds one from
-`TOKENTRIAGE_*` environment variables, so you can configure a deployment without code changes.
+`tokentriage.yaml` (found the way `load_config()` finds it) and a few environment variables; see
+[deployment.md](deployment.md).
 
 ```python
 import tokentriage
@@ -29,7 +30,7 @@ tokentriage.enable(tokentriage.RouterConfig.from_yaml("tokentriage.yaml"))
 | `backend` | `"lev-local"` | `"lev-local"` (lev in-process), `"lev-http"` (a `lev serve` server) or `"heuristic"` (keyword rules, no model) |
 | `lev_checkpoint` | `"interfaze-ai/lev"` | Hugging Face id or local path passed to `lev.load()` |
 | `lev_url` | `"http://localhost:8000"` | `lev serve` address for `backend="lev-http"` |
-| `lev_api_key` | `None` | Bearer token for a protected `lev serve`. Also read from `TOKENTRIAGE_LEV_API_KEY`. Never logged. |
+| `lev_api_key` | `None` | Bearer token for a protected `lev serve`. Set it in code only; put it in `TOKENTRIAGE_LEV_API_KEY` otherwise (in a config file it is ignored with a warning). Never logged. |
 | `timeout_s` | `1.5` | Seconds per decision. On timeout the heuristic decides that call. |
 | `block_on_load` | `False` | `False`: the first call starts loading lev in the background, and the heuristic routes until lev is ready |
 | `cache_size` | `1024` | Decisions cached, keyed by a SHA-256 of the request state |
@@ -42,7 +43,7 @@ tokentriage.enable(tokentriage.RouterConfig.from_yaml("tokentriage.yaml"))
 
 | Option | Default | Meaning |
 |---|---|---|
-| `tiers` | see [README](../README.md#providers) | `{provider: {"simple": id, "standard": id, "complex": id}}`. Merged over the defaults. |
+| `tiers` | see the tier table in the [README](../README.md#how-it-works) | `{provider: {"simple": id, "standard": id, "complex": id}}`. Merged over the defaults. |
 | `complex_threshold` | `0.5` | Complex if `P(complex) + 0.25·P(reasoning) + 0.15·P(code)` reaches this |
 | `simple_threshold` | `0.55` | Simple if `P(simple)` reaches this and reasoning is unlikely |
 | `min_confidence` | `0.45` | Below this top probability, the decision moves one tier up |
@@ -65,7 +66,7 @@ tokentriage.enable(tokentriage.RouterConfig.from_yaml("tokentriage.yaml"))
 | Option | Default | Meaning |
 |---|---|---|
 | `openrouter_mode` | `"family"` | `"family"`: stay with your model's vendor. `"ladder"`: cheapest capable model across `openrouter_vendors` |
-| `openrouter_vendors` | `None` | Vendors the ladder may use, e.g. `("anthropic", "google")`; `None` = all known families. Env: comma-separated |
+| `openrouter_vendors` | `None` | Vendors the ladder may use, e.g. `("anthropic", "google")`; `None` = all known families |
 | `openrouter_families` | built-in | Per-vendor tier overrides, e.g. `{"anthropic": {"simple": "anthropic/claude-haiku-4.5"}}` |
 
 ### Evaluation
@@ -102,24 +103,21 @@ tokentriage.enable(tokentriage.RouterConfig.from_yaml("tokentriage.yaml"))
 
 ## Environment variables
 
-Every option above is available as `TOKENTRIAGE_<OPTION>` in upper case. These are read when `enable()` gets no config.
+Settings live in `tokentriage.yaml` (every option above is a key under `router:`) or in the `RouterConfig` you pass in
+code. Only these environment variables are read:
 
-```bash
-TOKENTRIAGE_BACKEND=heuristic
-TOKENTRIAGE_LOG_LEVEL=DEBUG            # DEBUG also logs why each tier was picked
-TOKENTRIAGE_LOG_PROMPT_CHARS=0
-TOKENTRIAGE_MIN_TIER=standard
-TOKENTRIAGE_USAGE_FILE=false
-TOKENTRIAGE_HOME=/data/tokentriage
-```
+| Variable | Purpose |
+|---|---|
+| `TOKENTRIAGE_CONFIG` | Path to the config file, instead of searching for `tokentriage.yaml` |
+| `TOKENTRIAGE_HOME` | The data folder (default `~/.tokentriage`) |
+| `TOKENTRIAGE_ENABLED` | Kill switch: any value other than `1`, `true`, `yes` or `on` turns routing off |
+| `TOKENTRIAGE_LOG_LEVEL`, `TOKENTRIAGE_BACKEND`, `TOKENTRIAGE_MODE` | Override `log_level`, `backend` and `mode` from the file |
+| `TOKENTRIAGE_LEV_API_KEY` | Secret: bearer key for a protected `lev serve` |
 
-Three variables have a special form:
-
-```bash
-TOKENTRIAGE_OPENAI_SIMPLE=gpt-4o-mini                          # TOKENTRIAGE_<PROVIDER>_<TIER> overrides one tier
-TOKENTRIAGE_PROVIDER_HOSTS=gateway.corp.com=anthropic,llm.corp.com=openai
-TOKENTRIAGE_NEVER_ROUTE="ft:*,my-custom-*"                     # comma-separated patterns
-```
+The override variables beat the file, and the file beats the defaults. Earlier versions also accepted
+`TOKENTRIAGE_<OPTION>` for every option, `TOKENTRIAGE_<PROVIDER>_<TIER>`, `TOKENTRIAGE_PROVIDER_HOSTS`,
+`TOKENTRIAGE_FRAMEWORKS` and `TOKENTRIAGE_PROVIDERS`; these are now ignored with a warning, and the setting goes in the
+YAML. What each variable does, and the old-to-new mapping: [deployment.md](deployment.md).
 
 Invalid values fail when the config is built, before any call is routed. Examples: an unknown `min_tier`, a tier map
 missing a tier, or a remote `lev_url` that isn't allowed.

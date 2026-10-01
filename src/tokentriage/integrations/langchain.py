@@ -35,7 +35,7 @@ from ..providers import ALL_PROVIDERS, PROVIDER_CLASSES, TARGETS, Target, openro
 from ..router import Router
 from ..telemetry import Telemetry
 from ..tracing import CallTrace
-from ._sdk_common import ROUTED
+from ._sdk_common import ROUTED, fail_open
 
 log = logging.getLogger("tokentriage")
 
@@ -122,6 +122,14 @@ def _compat_updates(provider: str, llm: Any, target: Target, model: str) -> dict
 
 
 def _plan(llm: Any, target: Target, args: tuple, kwargs: dict, stream: bool) -> tuple[Any, CallTrace, dict | None] | None:
+    try:
+        return _plan_unguarded(llm, target, args, kwargs, stream)
+    except Exception as exc:  # noqa: BLE001 - a routing bug must never break the app's own call
+        fail_open(target.class_name, exc)
+        return None
+
+
+def _plan_unguarded(llm: Any, target: Target, args: tuple, kwargs: dict, stream: bool) -> tuple[Any, CallTrace, dict | None] | None:
     if not _should_route(llm):
         return None
     messages, run_manager = _split_args(args, kwargs)

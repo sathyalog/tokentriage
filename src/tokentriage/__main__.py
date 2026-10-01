@@ -22,7 +22,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from . import __version__, live
 from . import usage_store as u
-from .config import RouterConfig
+from .config_loader import resolve_config
 from .providers import PROVIDER_CLASSES, TARGETS
 from .cli_setup import setup_cmd
 
@@ -60,8 +60,14 @@ def check() -> int:
             else:
                 print(f"  ! no CUDA GPU: lev runs on CPU, seconds per decision. Raise timeout_s or use backend='lev-http'.")
 
-    cfg = RouterConfig.from_env()
-    print(f"\nConfig (from TOKENTRIAGE_* env): backend={cfg.backend} timeout_s={cfg.timeout_s} log_level={cfg.log_level}")
+    resolved = resolve_config()
+    cfg = resolved.cfg
+    where = str(resolved.source) if resolved.source else "no tokentriage.yaml found, using defaults"
+    print(f"\nConfig ({where}):")
+    print(f"  enabled={resolved.enabled} backend={cfg.backend} timeout_s={cfg.timeout_s} block_on_load={cfg.block_on_load} "
+          f"log_level={cfg.log_level}")
+    print(f"  frameworks={', '.join(resolved.frameworks)} sticky_threads={cfg.sticky_threads} "
+          f"thread_ttl_s={cfg.thread_ttl_s} escalate_after_repeats={cfg.escalate_after_repeats}")
 
     print("\nProvider packages:")
     for provider, classes in PROVIDER_CLASSES.items():
@@ -82,7 +88,7 @@ def check() -> int:
 
 
 def usage_cmd(args: argparse.Namespace) -> int:
-    cfg = RouterConfig.from_env()
+    cfg = resolve_config().cfg
     home = u.home_dir(args.dir or cfg.usage_home)
     retention = cfg.usage_retention_hours
     request = {"op": "usage", "since": args.since, "by": args.by, "user": args.user, "task": args.task,
@@ -254,7 +260,7 @@ def eval_cmd(args: argparse.Namespace) -> int:
 
     from .evaluate import load_prompts, make_chat_model, run_batch
 
-    cfg_env = RouterConfig.from_env()
+    cfg_env = resolve_config().cfg
     home = u.home_dir(cfg_env.usage_home)
 
     if args.action == "report":
@@ -277,7 +283,7 @@ def eval_cmd(args: argparse.Namespace) -> int:
         return 1
     log_path = args.log or str(home / f"eval-{_time.strftime('%Y%m%d-%H%M%S')}.jsonl")
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-    cfg = RouterConfig.from_env()
+    cfg = resolve_config().cfg
     cfg.mode = "eval"
     cfg.eval_sample_rate = 1.0
     cfg.eval_serve = "routed"

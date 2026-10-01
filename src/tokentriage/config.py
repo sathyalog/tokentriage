@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass, field, fields
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Literal
 
 from .providers import OPENROUTER_FAMILIES, PROVIDERS, all_models
@@ -142,7 +140,7 @@ class RouterConfig:
             families.setdefault(vendor, {}).update(mapping)
         self.openrouter_families = families
         self.never_route = tuple(self.never_route)
-        if isinstance(self.openrouter_vendors, str):  # from TOKENTRIAGE_OPENROUTER_VENDORS="anthropic,google"
+        if isinstance(self.openrouter_vendors, str):  # a comma-separated string: "anthropic,google"
             self.openrouter_vendors = tuple(v.strip() for v in self.openrouter_vendors.split(",") if v.strip())
         elif self.openrouter_vendors is not None:
             self.openrouter_vendors = tuple(self.openrouter_vendors)
@@ -154,55 +152,3 @@ class RouterConfig:
             missing = [t for t in TIERS if not mapping.get(t)]
             if missing:
                 raise ValueError(f"tiers[{provider!r}] is missing {missing}")
-
-    @classmethod
-    def from_env(cls, prefix: str = "TOKENTRIAGE_") -> RouterConfig:
-        """Settings from TOKENTRIAGE_* variables, on top of the YAML file named by TOKENTRIAGE_CONFIG (if set)."""
-        config_file = os.environ.get(prefix + "CONFIG")
-        cfg = cls.from_yaml(config_file) if config_file else cls()
-        for f in fields(cls):
-            raw = os.environ.get(prefix + f.name.upper())
-            if raw is None or f.name in ("tiers", "provider_hosts", "openrouter_families"):
-                continue
-            setattr(cfg, f.name, _coerce(raw, getattr(cfg, f.name)))
-        for provider in cfg.tiers:
-            for tier in TIERS:
-                raw = os.environ.get(f"{prefix}{provider.upper()}_{tier.upper()}")
-                if raw:
-                    cfg.tiers[provider][tier] = raw
-        # TOKENTRIAGE_PROVIDER_HOSTS="gateway.corp.com=anthropic,llm.corp.com=openai"
-        raw_hosts = os.environ.get(prefix + "PROVIDER_HOSTS")
-        if raw_hosts:
-            cfg.provider_hosts = dict(pair.split("=", 1) for pair in raw_hosts.split(",") if "=" in pair)
-        cfg.__post_init__()
-        return cfg
-
-    @classmethod
-    def from_yaml(cls, path: str | Path) -> RouterConfig:
-        import yaml
-
-        data = yaml.safe_load(Path(path).read_text()) or {}
-        tiers = data.pop("tiers", {})
-        for key in ("never_route", "openrouter_vendors"):
-            if isinstance(data.get(key), list):
-                data[key] = tuple(data[key])
-        cfg = cls(**data)
-        for provider, mapping in tiers.items():
-            cfg.tiers.setdefault(provider, {}).update(mapping)
-        cfg.__post_init__()
-        return cfg
-
-
-def _coerce(raw: str, current: object) -> object:
-    value = raw.strip()
-    if isinstance(current, bool):
-        return value.lower() in ("1", "true", "yes", "on")
-    if value.lower() in ("none", "null", "off", ""):
-        return None
-    if isinstance(current, int):
-        return int(value)
-    if isinstance(current, float):
-        return float(value)
-    if isinstance(current, tuple):
-        return tuple(p.strip() for p in value.split(",") if p.strip())
-    return value

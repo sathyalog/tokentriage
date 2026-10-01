@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ def find_config_file(start_dir: Path | None = None, max_depth: int = 5) -> Path 
     for _ in range(max_depth):
         for name in ["tokentriage.yaml", "tokentriage.yml", "tokentriage.toml", ".tokentriage"]:
             path = current / name
-            if path.exists():
+            if path.is_file():  # ~/.tokentriage is the data folder, not a config file
                 return path
         
         # Also check for [tool.tokentriage] in pyproject.toml
@@ -83,37 +83,71 @@ def load_config_file(path: Path) -> dict[str, Any]:
         raise ValueError(f"Unknown config format: {path.name}")
 
 
-def load_config_from_env(prefix: str = "TOKENTRIAGE_") -> dict[str, Any]:
-    """Load config from environment variables."""
-    config: dict[str, Any] = {}
-    
-    # Simple env vars
-    if os.getenv(f"{prefix}ENABLED"):
-        config["enabled"] = os.getenv(f"{prefix}ENABLED").lower() == "true"
-    
-    backend = os.getenv(f"{prefix}BACKEND")
-    if backend:
-        config["backend"] = backend
-    
-    timeout = os.getenv(f"{prefix}TIMEOUT_S")
-    if timeout:
-        config["timeout_s"] = float(timeout)
-    
-    log_level = os.getenv(f"{prefix}LOG_LEVEL")
-    if log_level:
-        config["log_level"] = log_level
-    
-    # Frameworks list
-    frameworks = os.getenv(f"{prefix}FRAMEWORKS")
-    if frameworks:
-        config["frameworks"] = [f.strip() for f in frameworks.split(",")]
-    
-    # Providers list
-    providers = os.getenv(f"{prefix}PROVIDERS")
-    if providers:
-        config["providers"] = [p.strip() for p in providers.split(",")]
-    
-    return config
+# Environment variables tokentriage reads. Everything else is configured in tokentriage.yaml.
+#   secrets:    TOKENTRIAGE_LEV_API_KEY (read by the lev-http client), provider API keys (read by the SDKs)
+#   locations:  TOKENTRIAGE_HOME (data folder), TOKENTRIAGE_CONFIG (path to the YAML file)
+#   overrides:  TOKENTRIAGE_ENABLED (kill switch), TOKENTRIAGE_LOG_LEVEL, TOKENTRIAGE_BACKEND, TOKENTRIAGE_MODE
+KEPT_ENV = frozenset({
+    "TOKENTRIAGE_HOME", "TOKENTRIAGE_CONFIG", "TOKENTRIAGE_ENABLED", "TOKENTRIAGE_LOG_LEVEL",
+    "TOKENTRIAGE_BACKEND", "TOKENTRIAGE_MODE", "TOKENTRIAGE_LEV_API_KEY",
+})
+INTERNAL_ENV = frozenset({"TOKENTRIAGE_AUTOENABLE"})  # set by `tokentriage run`
+
+_BACKENDS = ("lev-local", "lev-http", "heuristic")
+_MODES = ("route", "eval")
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_TRUE = ("1", "true", "yes", "on")
+_warned_env: set[str] = set()
+
+
+@dataclass
+class Resolved:
+    """Settings after reading the file and the kept environment variables."""
+
+    cfg: RouterConfig
+    frameworks: tuple[str, ...]
+    providers: tuple[str, ...] | None
+    enabled: bool
+    source: Path | None
+
+
+def env_kill_switch() -> bool:
+    """True when TOKENTRIAGE_ENABLED is set to a false value: routing must stay off."""
+    raw = os.environ.get("TOKENTRIAGE_ENABLED", "").strip()
+    return bool(raw) and raw.lower() not in _TRUE
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key not in _warned_env:
+        _warned_env.add(key)
+        print(f"⚠️  tokentriage: {message}")
+
+
+def _apply_env(cfg: RouterConfig) -> None:
+    """The kept override variables win over the file."""
+    for name, field, allowed in (("TOKENTRIAGE_BACKEND", "backend", _BACKENDS), ("TOKENTRIAGE_MODE", "mode", _MODES)):
+        raw = os.environ.get(name, "").strip().lower()
+        if not raw:
+            continue
+        if raw in allowed:
+            setattr(cfg, field, raw)
+        else:
+            _warn_once(name, f"{name}={raw!r} ignored; expected one of {', '.join(allowed)}")
+    level = os.environ.get("TOKENTRIAGE_LOG_LEVEL", "").strip().upper()
+    if level:
+        if level in _LOG_LEVELS:
+            cfg.log_level = level
+        else:
+            _warn_once("TOKENTRIAGE_LOG_LEVEL", f"TOKENTRIAGE_LOG_LEVEL={level!r} ignored; expected one of {', '.join(_LOG_LEVELS)}")
+
+
+def _warn_removed_env() -> None:
+    removed = sorted(k for k in os.environ if k.startswith("TOKENTRIAGE_") and k not in KEPT_ENV | INTERNAL_ENV)
+    fresh = [k for k in removed if k not in _warned_env]
+    if fresh:
+        _warned_env.update(fresh)
+        print(f"⚠️  tokentriage: ignoring environment variables that are no longer used: {', '.join(fresh)}. "
+              "Set these in tokentriage.yaml (see docs/deployment.md).")
 
 
 def _trigger_lev_download(checkpoint: str = "interfaze-ai/lev") -> bool:
@@ -255,41 +289,29 @@ def _models_to_tiers(models: dict) -> tuple[dict, dict]:
     return tiers, families
 
 
-def load_config(config_path: str | None = None, prefix: str = "TOKENTRIAGE_", auto_enable: bool = True) -> tuple[RouterConfig, list[str], list[str] | None]:
-    """Load configuration from file, env, or defaults.
-
-    Args:
-        config_path: Optional path to config file
-        prefix: Environment variable prefix (default: TOKENTRIAGE_)
-        auto_enable: If True, automatically enable routing and download LEV model if lev-local
-
-    Returns: (RouterConfig, frameworks_list, providers_list)
+def resolve_config(path: str | Path | None = None) -> Resolved:
+    """Read the settings: the file (an explicit path, else $TOKENTRIAGE_CONFIG, else found by searching
+    the current folder and its parents), then the kept environment variables on top.
     """
-    # Start with env vars
-    config_dict = load_config_from_env(prefix)
+    _warn_removed_env()
+    chosen = path or os.environ.get("TOKENTRIAGE_CONFIG") or None
+    source = Path(chosen) if chosen else find_config_file()
+    config_dict: dict[str, Any] = dict(load_config_file(source)) if source else {}
+    if source:
+        log.debug("tokentriage: loaded config file %s", source)
 
-    # Try to find and load config file
-    if config_path is None:
-        config_path_obj = find_config_file()
-    else:
-        config_path_obj = Path(config_path)
-
-    if config_path_obj:
-        file_config = load_config_file(config_path_obj)
-        log.debug("tokentriage: loaded config file %s", config_path_obj)
-        # File config takes precedence over env (file is more specific)
-        config_dict.update(file_config)
-
-    # Extract frameworks list (separate from RouterConfig)
-    frameworks = tuple(config_dict.pop("frameworks", ("langchain",)))
-    providers = tuple(config_dict.pop("providers", None)) if config_dict.get("providers") else None
+    frameworks = tuple(config_dict.pop("frameworks", None) or ("langchain",))
+    providers = tuple(config_dict.pop("providers")) if config_dict.get("providers") else None
 
     # Flatten nested 'router' dict into top-level config
     if "router" in config_dict:
-        router_config = config_dict.pop("router")
-        config_dict.update(router_config)
+        config_dict.update(config_dict.pop("router") or {})
 
-    enabled = config_dict.pop("enabled", True)
+    enabled = bool(config_dict.pop("enabled", True))
+    if "lev_api_key" in config_dict:
+        config_dict.pop("lev_api_key")
+        _warn_once("lev_api_key", "lev_api_key in a config file is ignored (files get committed). "
+                   "Set the TOKENTRIAGE_LEV_API_KEY environment variable instead.")
     if "models" in config_dict:
         tiers, families = _models_to_tiers(config_dict.pop("models") or {})
         # An explicit `tiers:` / `openrouter_families:` section wins over `models:`.
@@ -299,22 +321,39 @@ def load_config(config_path: str | None = None, prefix: str = "TOKENTRIAGE_", au
             families.setdefault(vendor, {}).update(mapping)
         config_dict["tiers"], config_dict["openrouter_families"] = tiers, families
 
-    # Keep only real RouterConfig fields. Anything else (e.g. `models:`, `features:`) is reported,
+    # Keep only real RouterConfig fields. Anything else (e.g. `features:`) is reported,
     # never allowed to make the whole file silently fall back to defaults.
     valid = {f.name for f in fields(RouterConfig)}
     ignored = sorted(k for k in config_dict if k not in valid)
     if ignored:
-        print(f"⚠️  tokentriage: ignoring config keys that are not RouterConfig settings: {', '.join(ignored)}")
+        _warn_once(f"keys:{ignored}", f"ignoring config keys that are not RouterConfig settings: {', '.join(ignored)}")
     config_dict = {k: v for k, v in config_dict.items() if k in valid}
     for key in ("never_route", "openrouter_vendors"):
         if isinstance(config_dict.get(key), list):
             config_dict[key] = tuple(config_dict[key])
     cfg = RouterConfig(**config_dict)
+    _apply_env(cfg)
+    if env_kill_switch():
+        enabled = False
+    return Resolved(cfg, frameworks, providers, enabled, source)
+
+
+def load_config(config_path: str | None = None, auto_enable: bool = True) -> tuple[RouterConfig, tuple[str, ...], tuple[str, ...] | None]:
+    """Load tokentriage.yaml (see resolve_config), prepare lev if needed, and enable routing.
+
+    Args:
+        config_path: Optional path to a config file (else $TOKENTRIAGE_CONFIG, else searched for)
+        auto_enable: If True, automatically enable routing and download LEV model if lev-local
+
+    Returns: (RouterConfig, frameworks, providers)
+    """
+    resolved = resolve_config(config_path)
+    cfg, frameworks, providers, enabled = resolved.cfg, resolved.frameworks, resolved.providers, resolved.enabled
     log.debug("tokentriage: backend=%s timeout_s=%s block_on_load=%s auto_enable=%s",
               cfg.backend, cfg.timeout_s, cfg.block_on_load, auto_enable)
 
     if not enabled:
-        print("tokentriage: disabled in config (enabled: false); calls are not routed")
+        print("tokentriage: disabled (enabled: false or TOKENTRIAGE_ENABLED=false); calls are not routed")
         return cfg, frameworks, providers
 
     _check_tier_models(cfg)

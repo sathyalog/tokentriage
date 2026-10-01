@@ -24,6 +24,20 @@ log = logging.getLogger("tokentriage")
 ROUTED: ContextVar[bool] = ContextVar("tokentriage_routed", default=False)
 
 
+_failed: set[str] = set()
+
+
+def fail_open(where: str, exc: Exception) -> None:
+    """Routing itself failed: the call goes to the configured model. Warn the first time, then stay quiet."""
+    if where in _failed:
+        log.debug("tokentriage: routing failed for %s", where, exc_info=True)
+        return
+    _failed.add(where)
+    log.warning("tokentriage: routing failed for %s calls (%s: %s); they use the configured model instead. "
+                "Set log_level: DEBUG for the traceback.", where, type(exc).__name__, exc)
+    log.debug("tokentriage: routing failure details", exc_info=True)
+
+
 def provider_for(client: Any, allowed: frozenset[str], extra_hosts: dict[str, str] | None) -> str | None:
     """Provider served by this client's endpoint, if it is one this SDK may route."""
     host = host_of(str(getattr(client, "base_url", "") or ""))
@@ -65,6 +79,15 @@ def _apply_compat(provider: str, model: str, kwargs: dict) -> None:
 
 def _plan(resource: Any, kwargs: dict, allowed: frozenset[str], enabled: set[str], extract: Callable,
           stream: bool) -> tuple[dict, Any] | None:
+    try:
+        return _plan_unguarded(resource, kwargs, allowed, enabled, extract, stream)
+    except Exception as exc:  # noqa: BLE001 - a routing bug must never break the app's own call
+        fail_open(type(resource).__module__.split(".")[0], exc)
+        return None
+
+
+def _plan_unguarded(resource: Any, kwargs: dict, allowed: frozenset[str], enabled: set[str], extract: Callable,
+                    stream: bool) -> tuple[dict, Any] | None:
     from . import langchain as lc
 
     router = lc._State.router

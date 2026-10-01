@@ -15,7 +15,7 @@ tokentriage models refresh
 ```
 
 1. **Prices and capabilities:** downloads OpenRouter's public model catalogue. No key is needed. Direct providers use it for any model missing from the built-in list, so a new `claude-opus-4-8` gets its price and guardrail checks. Dated ids such as `claude-sonnet-4-5-20250929` match their undated name.
-2. **Available models:** for each provider whose key is set, lists the models that key can use. The keys are `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY` and `XAI_API_KEY`. Providers without a key are skipped, and keys are never printed.
+2. **Available models:** for each provider whose key is set, lists the models that key can use. The keys are `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY` and `XAI_API_KEY`. Providers without a key are skipped, and keys are never printed. The `tokentriage` command doesn't read `.env` files, so load the keys into your shell first: `set -a; source .env; set +a`.
 
 `tokentriage openrouter refresh` still updates the catalogue alone.
 

@@ -52,6 +52,15 @@ def _prompt_input(prompt: str, default: str = "") -> str:
     return answer if answer else default
 
 
+def _prompt_int(prompt: str, default: int) -> int:
+    """Prompt for a whole number >= 0."""
+    while True:
+        answer = _prompt_input(prompt, default=str(default))
+        if answer.isdigit():
+            return int(answer)
+        print("Please enter a whole number (0 or more)")
+
+
 def setup_interactive() -> dict | None:
     """
     Interactive setup wizard for tokentriage configuration.
@@ -204,8 +213,37 @@ If "Yes": You'll customize each tier's model selection
     else:
         config_dict["router"]["log_level"] = "INFO"
 
-    # Step 6: Review and save
-    print("\n\nSTEP 6: Review configuration")
+    # Step 6: Optional advanced settings
+    print("\n\nSTEP 6: Advanced settings (frameworks and conversations)")
+    print("-" * 80)
+    print("""
+Frameworks: which libraries to route. LangChain is routed by default; add anthropic / openai
+to also route direct Anthropic SDK / OpenAI SDK calls.
+Conversations: keep each conversation on one model (so prompt caching keeps working), and move it
+up a tier when the user asks the same question again.
+""")
+    if _prompt_yes_no("Configure advanced settings?"):
+        known = ("langchain", "anthropic", "openai")
+        raw = _prompt_input("Frameworks to route (comma-separated: langchain, anthropic, openai)", default="langchain")
+        chosen = [f.strip() for f in raw.split(",") if f.strip()]
+        unknown = [f for f in chosen if f not in known]
+        if unknown:
+            print(f"   Ignoring unknown frameworks: {', '.join(unknown)}")
+        chosen = [f for f in chosen if f in known] or ["langchain"]
+        if chosen != ["langchain"]:
+            config_dict = {"enabled": True, "frameworks": chosen,
+                           **{k: v for k, v in config_dict.items() if k != "enabled"}}
+        if not _prompt_yes_no("Keep each conversation on one model (sticky_threads)?", default=True):
+            config_dict["router"]["sticky_threads"] = False
+        repeats = _prompt_int("Move up a tier after how many re-asked questions? (0 = off)", 2)
+        if repeats != 2:
+            config_dict["router"]["escalate_after_repeats"] = repeats
+        ttl = _prompt_int("Seconds a quiet conversation keeps its model", 300)
+        if ttl != 300:
+            config_dict["router"]["thread_ttl_s"] = ttl
+
+    # Step 7: Review and save
+    print("\n\nSTEP 7: Review configuration")
     print("-" * 80)
     print("\nYour configuration:")
     print(yaml.dump(config_dict, default_flow_style=False, sort_keys=False))

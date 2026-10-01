@@ -53,9 +53,29 @@ def test_disabled():
 # -- lev-http endpoint guard ---------------------------------------------------
 
 
-@pytest.mark.parametrize("url", ["http://localhost:8000", "http://127.0.0.1:8000", "http://10.1.2.3:8000", "http://lev.internal:8000"])
+@pytest.mark.parametrize("url", [
+    "http://localhost:8000", "http://127.0.0.1:8000", "http://10.1.2.3:8000", "http://lev.internal:8000",
+    # Docker Compose and Kubernetes service names
+    "http://lev:8000", "http://lev-service:8000", "http://lev_server:8000",
+    "http://lev-service.default.svc:8000", "http://lev-service.default.svc.cluster.local:8000",
+])
 def test_local_lev_urls_allowed(url):
     LevHttpClassifier(url)
+
+
+@pytest.mark.parametrize("url", [
+    "http://lev.example.com:8000", "http://example.com", "http://8.8.8.8:8000",
+    # dotless numbers resolve to public addresses (134744072 is 8.8.8.8)
+    "http://134744072:8000", "http://0x08080808:8000",
+])
+def test_public_looking_lev_urls_are_refused(url):
+    with pytest.raises(UnsafeLevEndpoint):
+        LevHttpClassifier(url)
+
+
+def test_empty_host_is_refused():
+    with pytest.raises(UnsafeLevEndpoint):
+        LevHttpClassifier("http:///v1")
 
 
 def test_remote_lev_url_needs_opt_in_and_https():

@@ -111,16 +111,6 @@ def test_ladder_respects_allowlist_and_capabilities():
     assert d.model == "google/gemini-3.1-flash-lite"   # only Gemini takes video
 
 
-def test_ladder_vendors_from_env(monkeypatch):
-    monkeypatch.setenv("TOKENTRIAGE_OPENROUTER_MODE", "ladder")
-    monkeypatch.setenv("TOKENTRIAGE_OPENROUTER_VENDORS", "anthropic, google")
-    cfg = RouterConfig.from_env()
-    assert cfg.openrouter_mode == "ladder" and cfg.openrouter_vendors == ("anthropic", "google")
-
-
-# -- dated ids -------------------------------------------------------------------
-
-
 def test_dated_ids_resolve_prices_and_capabilities():
     assert canonical_id("claude-haiku-4-5-20251001") == "claude-haiku-4-5"
     assert canonical_id("claude-opus-4-5@20251101") == "claude-opus-4-5"

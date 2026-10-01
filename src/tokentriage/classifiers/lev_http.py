@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import time
 
 from .. import pii
@@ -20,13 +21,20 @@ class UnsafeLevEndpoint(ValueError):
     """The lev-http URL would send prompts somewhere this config does not allow."""
 
 
+# A name with no dot, such as a Docker Compose service ("lev") or a Kubernetes one ("lev-service").
+_SERVICE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
+
+
 def _is_private(host: str) -> bool:
-    if host in ("localhost",) or host.endswith((".local", ".internal", ".localhost")):
+    """Judged by the name alone (no DNS lookup): local names, private addresses, and service names."""
+    if host in ("localhost",) or host.endswith((".local", ".internal", ".localhost", ".svc")):
         return True
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return False
+        # Public hosts always contain a dot, so a dotless name can only resolve through the local or cluster DNS.
+        # It must start with a letter: numeric forms like "134744072" or "0x08080808" resolve to public addresses.
+        return bool(_SERVICE_NAME.fullmatch(host))
     return ip.is_loopback or ip.is_private or ip.is_link_local
 
 

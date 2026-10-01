@@ -36,11 +36,12 @@
 
 ## API keys
 
-- **tokentriage never reads, stores or logs provider API keys.** They stay inside your chat model objects as `SecretStr`.
+- **tokentriage never stores or logs provider API keys.** They stay inside your chat model objects as `SecretStr`. The one place it reads them is `tokentriage models refresh`, which sends each key only to that provider's own model-list endpoint, to list the models the key can use.
 - **Same key, same provider.** The per-call copy uses the same key and endpoint. The model is only ever switched to
   another model from the same provider, so a key is never sent to a different provider.
 - **One credential of its own.** The only one tokentriage handles is the optional `lev serve` token (`lev_api_key` /
-  `TOKENTRIAGE_LEV_API_KEY`). It is excluded from `repr` and logs.
+  `TOKENTRIAGE_LEV_API_KEY`). It is excluded from `repr` and logs. Keep it in the environment: a `lev_api_key` in a config
+  file is ignored with a warning, because config files get committed.
 - **Tested.** The test suite checks that a key typed into a prompt never appears in stderr, the JSONL file or the usage
   files.
 
@@ -74,7 +75,12 @@ These rules decide whether a call may be routed, and to which model.
 
 ## lev-http endpoint rules
 
-- **Always allowed:** `localhost`, loopback, private-network IPs and `*.local` / `*.internal` / `*.localhost` hosts.
+- **Always allowed:** `localhost`, loopback, private-network IPs, `*.local` / `*.internal` / `*.localhost` / `*.svc` hosts, and
+  service names with no dot that start with a letter (Docker Compose `lev`, Kubernetes `lev-service`). A public host always
+  contains a dot, so a dotless name can only resolve through your local or cluster DNS. Numeric forms such as `134744072`
+  are not accepted, because they resolve to public addresses.
+- **The check is by name only,** with no DNS lookup. If you can't trust the resolver a service name goes through, give the
+  server an IP address or use `allow_remote_lev=True` with `https://`.
 - **Anything else** needs `allow_remote_lev=True`, and the URL must use `https://`.
 - **Redirects are refused,** so a prompt can't be forwarded to another host.
 - **Redaction:** the state is redacted before sending unless `redact_classifier_input=False`.

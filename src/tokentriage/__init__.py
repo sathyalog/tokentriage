@@ -12,6 +12,7 @@ LangChain chat models.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, TypeVar
 
 from . import live, pii, tracing
@@ -21,12 +22,14 @@ from .integrations import langchain as _lc
 from .providers import ALL_PROVIDERS, PROVIDERS, resolve_provider
 from .router import Decision, Router
 from .telemetry import Telemetry
-from .config_loader import load_config
+from .config_loader import env_kill_switch, load_config, resolve_config
 from .setup_check import validate_setup
 from .cli_setup import setup_interactive
 
 # Run setup validation on import
 validate_setup()
+
+log = logging.getLogger("tokentriage")
 
 __all__ = [
     "DEFAULT_TIERS",
@@ -62,7 +65,7 @@ def _configure(config: RouterConfig | None, router: Router | None) -> None:
     if router is not None:
         _lc._State.router = router
     elif config is not None or _lc._State.router is None:
-        _lc._State.router = Router(config or RouterConfig.from_env())
+        _lc._State.router = Router(config or resolve_config().cfg)
     cfg = _lc._State.router.config
     if _lc._State.telemetry is None or config is not None or router is not None:
         _lc._State.telemetry = Telemetry(cfg.log_path)
@@ -84,6 +87,17 @@ class _UsageState:
     configured_for: int | None = None
 
 
+_usage_warned: set[str] = set()
+
+
+def _usage_unavailable(what: str, home: Any, exc: OSError) -> None:
+    """The data folder can't be used (read-only filesystem, no home folder): say so once and go on."""
+    if what not in _usage_warned:
+        _usage_warned.add(what)
+        log.warning("tokentriage: turning off %s: %s is not usable (%s). Set TOKENTRIAGE_HOME to a writable folder, "
+                    "or set usage_file / usage_live to false.", what, home, exc.strerror or exc)
+
+
 def _setup_usage(cfg: RouterConfig) -> None:
     """Wire the last-24h stores for this config (idempotent per config object)."""
     if _UsageState.configured_for == id(cfg):
@@ -92,16 +106,24 @@ def _setup_usage(cfg: RouterConfig) -> None:
     home = _usage.home_dir(cfg.usage_home)
     if _UsageState.memory is None:
         _UsageState.memory = _usage.MemoryStore(cfg.usage_retention_hours, cfg.usage_memory_max)
-    files = _usage.HourlyFileStore(home / "usage", cfg.usage_retention_hours) if cfg.usage_file else None
+    files = None
+    if cfg.usage_file:
+        try:
+            files = _usage.HourlyFileStore(home / "usage", cfg.usage_retention_hours)
+        except OSError as exc:
+            _usage_unavailable("usage files", home, exc)
     tracing.set_usage_sink(_usage.UsageSink(_UsageState.memory, files))
 
     if _UsageState.server is not None:
         _UsageState.server.stop()
         _UsageState.server = None
     if cfg.usage_live:
-        server = live.LiveServer(_UsageState.memory, live.run_dir(home))
-        if server.start():
-            _UsageState.server = server
+        try:
+            server = live.LiveServer(_UsageState.memory, live.run_dir(home))
+            if server.start():
+                _UsageState.server = server
+        except OSError as exc:
+            _usage_unavailable("the live usage view", home, exc)
 
 
 def _teardown_usage() -> None:
@@ -116,20 +138,38 @@ def _teardown_usage() -> None:
 def enable(
     config: RouterConfig | None = None,
     *,
-    providers: tuple[str, ...] = _DEFAULT_PROVIDERS,
+    providers: tuple[str, ...] | None = None,
     router: Router | None = None,
-    frameworks: tuple[str, ...] = ("langchain",),
+    frameworks: tuple[str, ...] | None = None,
 ) -> list[str]:
     """Route every supported chat model call in this process.
 
-    providers: which providers to route (default: all, including "openrouter"). Returns the
-    ones whose LangChain package is installed.
-    
-    frameworks: which SDK frameworks to enable routing for (default: ["langchain"]).
+    With no config, the settings come from tokentriage.yaml (found like load_config does), then the
+    TOKENTRIAGE_ENABLED / _BACKEND / _MODE / _LOG_LEVEL overrides. TOKENTRIAGE_ENABLED=false turns routing
+    off whatever config is passed.
+
+    providers: which providers to route (default: the file's, else all, including "openrouter").
+    Returns the ones whose LangChain package is installed.
+
+    frameworks: which SDK frameworks to enable routing for (default: the file's, else ["langchain"]).
     Supports: "langchain", "anthropic", "openai".
     """
+    if config is None and router is None:
+        resolved = resolve_config()
+        if not resolved.enabled:
+            log.info("tokentriage: disabled (enabled: false or TOKENTRIAGE_ENABLED=false); not routing")
+            return []
+        if _lc._State.router is None:
+            config = resolved.cfg
+        frameworks = frameworks or resolved.frameworks
+        providers = providers or resolved.providers
+    elif env_kill_switch():
+        log.info("tokentriage: disabled by TOKENTRIAGE_ENABLED=false; not routing")
+        return []
+    frameworks = frameworks or ("langchain",)
+    providers = providers or _DEFAULT_PROVIDERS
     _configure(config, router)
-    
+
     installed = []
     
     # Install each framework's routing

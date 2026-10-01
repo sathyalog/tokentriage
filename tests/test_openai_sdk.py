@@ -86,3 +86,15 @@ def test_langchain_call_is_not_routed_twice(sent):
     tokentriage.enable(router=Router(RouterConfig(), FixedClassifier(SIMPLE)), frameworks=("langchain", "openai"))
     ChatOpenAI(model="gpt-6-astra", api_key="sk-test").invoke("What is 2+2?")
     assert [m for _, m in sent] == ["gpt-6-luna"] and tokentriage.stats()["calls"] == 1
+
+
+def test_router_bug_falls_back_to_the_configured_model(sent, monkeypatch):
+    router = Router(RouterConfig(), FixedClassifier(SIMPLE))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug inside the router")
+
+    monkeypatch.setattr(router, "decide", boom)
+    tokentriage.enable(router=router, frameworks=("openai",))
+    _ask(openai.OpenAI(api_key="sk-test"))
+    assert [m for _, m in sent] == ["gpt-6-astra"]

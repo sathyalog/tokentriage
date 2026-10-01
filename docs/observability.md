@@ -112,6 +112,8 @@ print(tokentriage.usage_report(by="task"))             # the same table as the C
 
 ### Docker, servers and Kubernetes
 
+Full examples for each environment: [deployment.md](deployment.md).
+
 Run the CLI where the app runs:
 
 ```bash

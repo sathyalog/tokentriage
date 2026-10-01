@@ -37,3 +37,11 @@ def _clean(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("TOKENTRIAGE_HOME", str(tmp_path_factory.mktemp("tokentriage_home")))
     yield
     tokentriage.disable()
+    from tokentriage import _usage_warned
+    from tokentriage.config_loader import _warned_env
+
+    _warned_env.clear()
+    _usage_warned.clear()
+    from tokentriage.integrations._sdk_common import _failed
+
+    _failed.clear()

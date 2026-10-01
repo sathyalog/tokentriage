@@ -89,12 +89,8 @@ timeout_s = 2.0
 
 ### Environment Variables
 
-```bash
-export TOKENTRIAGE_ENABLED=true
-export TOKENTRIAGE_FRAMEWORKS=langchain,anthropic,openai
-export TOKENTRIAGE_BACKEND=lev-local
-export TOKENTRIAGE_TIMEOUT_S=2.0
-```
+Settings are not set through environment variables. A few variables remain (the config path, the data folder, a kill
+switch, three overrides and the secrets); see [deployment.md](deployment.md) for each one.
 
 ---
 
@@ -121,69 +117,20 @@ tokentriage.enable(frameworks=["langchain", "anthropic", "openai"])
 
 ## Production Deployment
 
-### Docker with Config File
-
-```dockerfile
-FROM python:3.12
-WORKDIR /app
-
-COPY tokentriage.yaml .
-COPY pyproject.toml .
-COPY requirements.txt .
-
-RUN pip install -r requirements.txt
-
-COPY . .
-
-CMD ["python", "-m", "myapp"]
-```
-
-```python
-# myapp/__init__.py
-import tokentriage
-tokentriage.load_config()  # Reads tokentriage.yaml from root
-```
-
-### Kubernetes ConfigMap
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: tokentriage-config
-data:
-  tokentriage.yaml: |
-    enabled: true
-    frameworks: [langchain, anthropic]
-    router:
-      backend: lev-http
-      lev_url: http://lev-service:8000
-```
-
-```python
-# app.py
-import tokentriage
-tokentriage.load_config()  # Mounts from /etc/config/tokentriage.yaml
-```
+Docker, Kubernetes (ConfigMap, Secrets, a shared lev server), serverless, several workers and air-gapped setups are
+covered, with working examples, in [deployment.md](deployment.md).
 
 ---
 
 ## Configuration Precedence
 
-1. **Command-line config** (if passed to `enable()`)
-2. **Config file** (`tokentriage.yaml`, `pyproject.toml`)
-3. **Environment variables** (`TOKENTRIAGE_*`)
-4. **Defaults** (lev-local backend, LangChain framework)
+1. **Override variables** (`TOKENTRIAGE_ENABLED`, `_BACKEND`, `_MODE`, `_LOG_LEVEL`)
+2. **Config file** (`tokentriage.yaml`, or the file named by `TOKENTRIAGE_CONFIG` or passed to `load_config()`)
+3. **Defaults** (lev-local backend, LangChain framework)
 
-### Environment variables only fill gaps
-
-`TOKENTRIAGE_*` variables apply to settings the config file leaves out; **a value in `tokentriage.yaml` wins over the environment**. To use a different backend in production, keep it out of the shared file (or use a separate file, `load_config("tokentriage.prod.yaml")`):
-
-```bash
-# tokentriage.yaml does not set router.backend, so the variable applies
-export TOKENTRIAGE_BACKEND=heuristic
-python myapp.py
-```
+Settings passed in code (`enable(RouterConfig(...))`) are used as given; only the `TOKENTRIAGE_ENABLED=false` kill
+switch still applies to them. To use a different backend in one environment, point `TOKENTRIAGE_CONFIG` at a different
+file, or set `TOKENTRIAGE_BACKEND` for a quick override.
 
 ---
 
@@ -276,7 +223,7 @@ All 50+ files now route automatically with zero changes to their code.
 ## Troubleshooting
 
 **Config not found?**
-- Check file location: should be in project root or use `TOKENTRIAGE_CONFIG_PATH` env var
+- Check file location: it should be in the project root (or a parent folder), or set `TOKENTRIAGE_CONFIG`, or pass the path: `tokentriage.load_config("path/to/tokentriage.yaml")`
 - Supported names: `tokentriage.yaml`, `tokentriage.yml`, `pyproject.toml`
 
 **Framework not loaded?**

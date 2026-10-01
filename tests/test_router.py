@@ -69,21 +69,3 @@ def test_signals_from_lev_answer_dicts():
     }
     s = signals_from_answers(answers, "lev-http", 12.0)
     assert s.tier["simple"] == 0.8 and s.needs_reasoning == 0.1
-
-
-def test_env_config(monkeypatch):
-    monkeypatch.setenv("TOKENTRIAGE_BACKEND", "heuristic")
-    monkeypatch.setenv("TOKENTRIAGE_TIMEOUT_S", "3")
-    monkeypatch.setenv("TOKENTRIAGE_OPENAI_SIMPLE", "gpt-4o-mini")
-    cfg = RouterConfig.from_env()
-    assert cfg.backend == "heuristic" and cfg.timeout_s == 3.0 and cfg.tiers["openai"]["simple"] == "gpt-4o-mini"
-
-
-def test_config_file_with_env_overrides(tmp_path, monkeypatch):
-    f = tmp_path / "tokentriage.yaml"
-    f.write_text("min_tier: standard\nnever_route: ['ft:*']\nopenrouter_families:\n  nvidia:\n    simple: nvidia/a\n    standard: nvidia/b\n    complex: nvidia/c\n")
-    monkeypatch.setenv("TOKENTRIAGE_CONFIG", str(f))
-    monkeypatch.setenv("TOKENTRIAGE_TIMEOUT_S", "4")
-    cfg = RouterConfig.from_env()
-    assert cfg.min_tier == "standard" and cfg.never_route == ("ft:*",) and cfg.timeout_s == 4.0
-    assert cfg.openrouter_families["nvidia"]["complex"] == "nvidia/c" and "anthropic" in cfg.openrouter_families

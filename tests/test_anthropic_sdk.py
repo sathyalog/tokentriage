@@ -118,3 +118,15 @@ def test_langchain_call_is_not_routed_twice(sent):
     tokentriage.enable(router=Router(RouterConfig(), FixedClassifier(SIMPLE)), frameworks=("langchain", "anthropic"))
     ChatAnthropic(model="claude-opus-5-5", api_key="sk-ant-test", max_tokens=50).invoke("What is 2+2?")
     assert sent == ["claude-haiku-4-5"] and tokentriage.stats()["calls"] == 1
+
+
+def test_router_bug_falls_back_to_the_configured_model(sent, monkeypatch):
+    router = Router(RouterConfig(), FixedClassifier(SIMPLE))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug inside the router")
+
+    monkeypatch.setattr(router, "decide", boom)
+    tokentriage.enable(router=router, frameworks=("anthropic",))
+    _ask(anthropic.Anthropic(api_key="sk-ant-test"))
+    assert sent == ["claude-opus-5-5"]

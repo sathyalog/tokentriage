@@ -20,6 +20,7 @@
 - **Conversation-aware:** keeps each conversation on one model so prompt caching keeps working, and moves it to a better model when the user keeps re-asking the same question. [Details](docs/conversations.md).
 - **Guardrails:** never picks a model that can't fit the request's context, attachments or tool use, and never touches fine-tuned models. [Rules](docs/security.md#guardrails).
 - **Current model data:** `tokentriage models refresh` updates prices and capabilities and checks your tier models against what your API key can use. [Details](docs/models.md).
+- **Safe in production:** if routing itself fails, your call goes to the model in your code; one variable (`TOKENTRIAGE_ENABLED=false`) turns routing off without a redeploy. [Deployment guide](docs/deployment.md).
 - **Visible costs:** every decision is logged with its cost and savings; `tokentriage usage` and evaluation mode show the totals and the quality. [Logs and usage](docs/observability.md), [evaluation](docs/evaluation.md).
 
 ---
@@ -145,7 +146,7 @@ A plain `uv add git+...` installs a copy of the version on GitHub, so local edit
 tokentriage check
 ```
 
-This reports Python, lev and torch (and whether a CUDA GPU is present), which provider packages are installed, and where usage files are kept.
+This reports Python, lev and torch (and whether a CUDA GPU is present), which provider packages are installed, and where usage files are kept. It also prints the config file it found and the settings it produces, so you can see what your `tokentriage.yaml` does.
 
 ---
 
@@ -174,7 +175,8 @@ It asks a few questions, shows you the resulting config, and **writes `tokentria
 5. **Customise model tiers?** Answer `n` to use the provider's defaults. Answer `y` to be shown the default model for `simple`, `standard` and `complex`; press Enter to keep each one, or type another model id.
 6. **Enable usage tracking?** (default yes) Keeps token and cost totals for `tokentriage usage`.
 7. **Enable detailed logging?** (default no) Sets `log_level: DEBUG`, which shows the reason for each decision.
-8. **Save this configuration?** The wizard prints the YAML; answer `y` to write `tokentriage.yaml`.
+8. **Advanced settings?** (optional, default no) Which frameworks to route (`langchain`, `anthropic`, `openai`; default `langchain`), and the conversation settings: `sticky_threads`, `escalate_after_repeats` and `thread_ttl_s`. Only values that differ from the defaults are written.
+9. **Save this configuration?** The wizard prints the YAML; answer `y` to write `tokentriage.yaml`.
 
 For example, choosing lev-local with Anthropic and the defaults produces this (the lists are written out one per line in the real file):
 
@@ -193,7 +195,7 @@ models:
   complex:  {providers: [anthropic/claude-opus-5-5]}
 ```
 
-You can edit the file afterwards; it's read each time your app starts.
+Skip the advanced step and `frameworks` stays at LangChain only, with the conversation settings on at their defaults. You can edit the file afterwards (see [Configuration](#configuration)); it's read each time your app starts.
 
 #### Or write it by hand
 
@@ -265,7 +267,7 @@ If lev can't be installed, downloaded or loaded, `load_config()` says why and ro
 
 ## Configuration
 
-`tokentriage.yaml` is found in the current directory or up to five parent directories (`tokentriage.yml`, `tokentriage.toml`, `.tokentriage`, or `[tool.tokentriage]` in `pyproject.toml` also work). Every setting is listed in [docs/configuration.md](docs/configuration.md); TOML and environment-variable setups are in [docs/config_setup.md](docs/config_setup.md).
+`tokentriage.yaml` is found in the current folder and up to four parent folders (`tokentriage.yml`, `tokentriage.toml`, `.tokentriage`, or `[tool.tokentriage]` in `pyproject.toml` also work), or at the path in `TOKENTRIAGE_CONFIG`. Every setting is listed in [docs/configuration.md](docs/configuration.md); TOML setups are in [docs/config_setup.md](docs/config_setup.md); environments and environment variables are in [docs/deployment.md](docs/deployment.md).
 
 ```yaml
 enabled: true                 # false: load_config() does nothing (no routing)
@@ -296,7 +298,8 @@ providers: [anthropic]        # only route these providers (default: all install
 - **Model entries** are `provider/model` (`anthropic`, `openai`, `gemini`, `groq`, `deepseek`, `mistral`, `xai`, `huggingface`), or `openrouter/<vendor>/<model>` for OpenRouter, e.g. `openrouter/anthropic/claude-haiku-4.5`.
 - **Unknown keys** are reported with a warning and ignored; the rest of the file still applies.
 - **Other `router:` keys:** anything in `RouterConfig` can go under `router:`. See [docs/configuration.md](docs/configuration.md).
-- **Environment variables** `TOKENTRIAGE_BACKEND`, `TOKENTRIAGE_TIMEOUT_S`, `TOKENTRIAGE_LOG_LEVEL`, `TOKENTRIAGE_FRAMEWORKS` and `TOKENTRIAGE_PROVIDERS` are used when the YAML does not set that value. **The YAML wins.**
+- **Environment variables:** only a few remain: secrets, the data folder (`TOKENTRIAGE_HOME`), the config path (`TOKENTRIAGE_CONFIG`), the kill switch (`TOKENTRIAGE_ENABLED`), and three quick overrides (`TOKENTRIAGE_LOG_LEVEL`, `_BACKEND`, `_MODE`) that beat the file. Everything else is set in the YAML. See [Running in production](#running-in-production).
+- **Upgrading an existing file:** it keeps working, with differences. `models:` is now applied (it used to be ignored); conversations stay on one model and move up when a question is re-asked (`sticky_threads`, `escalate_after_repeats`; set `sticky_threads: false` and `escalate_after_repeats: 0` for the old behaviour); the Anthropic and OpenAI SDKs are routed only if you list them under `frameworks`; `enable()`, `tokentriage run`, `check`, `usage` and `eval` now read the YAML too; and environment variables that used to set other settings (`TOKENTRIAGE_MIN_TIER` and so on) are ignored with a warning naming them.
 
 Configuring in code instead of YAML:
 
@@ -327,7 +330,7 @@ router:
   timeout_s: 2.0
 ```
 
-- **Remote servers.** For a server outside your private network, set `allow_remote_lev: true`; tokentriage then requires an `https://` URL, because request text is sent to it.
+- **Remote servers.** For a server outside your private network, set `allow_remote_lev: true`; tokentriage then requires an `https://` URL, because request text is sent to it. Docker and Kubernetes service names (`http://lev:8000`, `http://lev-service:8000`) count as private, so they need neither.
 - **Authentication.** `lev serve` has no authentication of its own. tokentriage sends `Authorization: Bearer $TOKENTRIAGE_LEV_API_KEY`, so put the server behind something that checks that header (a reverse proxy, or a private Hugging Face Space with an HF token as the key).
 - **Redaction.** Personal data is redacted from the text sent to a lev-http server by default (`redact_classifier_input: true`).
 
@@ -351,7 +354,7 @@ tokentriage models refresh
 ```
 
 - **Prices and capabilities:** downloads current data for ~200 models (OpenRouter's public catalogue). New models, e.g. a new `claude-opus-4-8`, then get prices and guardrail checks, and dated ids like `claude-sonnet-4-5-20250929` match their undated name.
-- **Models your key can use:** for each provider whose API key is set, saves the list of available models. `load_config()` then warns when a tier model isn't available and suggests the newest of its family, e.g. `'claude-sonnet-5' … (newest similar: 'claude-sonnet-5-5')`. Startup makes no network calls.
+- **Models your key can use:** for each provider whose API key is set in your shell (the command doesn't read `.env`: run `set -a; source .env; set +a` first), saves the list of available models. `load_config()` then warns when a tier model isn't available and suggests the newest of its family, e.g. `'claude-sonnet-5' … (newest similar: 'claude-sonnet-5-5')`. Startup makes no network calls.
 - **You stay in control:** tier models never change on their own; set them under `models:`.
 
 Run it weekly or in CI. More: [docs/models.md](docs/models.md).
@@ -377,6 +380,34 @@ With that config, a simple request sent to `anthropic/claude-opus-5.5` can be an
 
 ---
 
+## Running in production
+
+Settings live in `tokentriage.yaml`. The environment holds only secrets, locations, a kill switch and three quick overrides:
+
+| Variable | Purpose |
+|---|---|
+| `TOKENTRIAGE_CONFIG` | Path to the config file: per-environment files, a mounted Kubernetes ConfigMap. Not needed otherwise, because `tokentriage.yaml` is found automatically |
+| `TOKENTRIAGE_HOME` | The data folder (default `~/.tokentriage`): usage files, live-view sockets, model data, eval output |
+| `TOKENTRIAGE_ENABLED` | Kill switch: set it to `false` and routing is off, with no file change |
+| `TOKENTRIAGE_LOG_LEVEL`, `_BACKEND`, `_MODE` | Quick overrides: debug logging, fall back to `heuristic`, evaluation mode |
+| `TOKENTRIAGE_LEV_API_KEY`, provider API keys | Secrets, environment only (`lev_api_key` in a file is ignored with a warning) |
+
+The override variables beat the YAML, and the YAML beats the defaults. Old per-setting variables such as `TOKENTRIAGE_MIN_TIER` are ignored with a warning naming them; put those settings in the YAML.
+
+| Environment | Backend |
+|---|---|
+| Laptop with less than ~16 GB of RAM | `heuristic`, or `lev-http` to a bigger machine |
+| CI and tests | `heuristic`, or `TOKENTRIAGE_ENABLED=false` |
+| One server with a GPU or 16 GB+ RAM | `lev-local` |
+| Containers and serverless | `heuristic` or `lev-http` (not `lev-local`) |
+| Kubernetes with many replicas | `lev-http` to one shared lev server |
+
+When something fails, your calls keep working: a slow or failed lev decision uses the heuristic, a bug inside routing sends the call to the model in your code, and an unwritable data folder only turns off usage files and the live view.
+
+The full guide, with every variable, Docker and Kubernetes examples, serverless, several workers, corporate gateways, air-gapped setups and a checklist: [docs/deployment.md](docs/deployment.md).
+
+---
+
 ## Monitoring usage and cost
 
 ```bash
@@ -390,6 +421,38 @@ tokentriage usage --json
 In code: `tokentriage.stats()`, `tokentriage.usage()`, `tokentriage.usage_report()`. Log lines, OpenTelemetry, how the 24-hour files and live view work, and running under Docker or Kubernetes: [docs/observability.md](docs/observability.md).
 
 To check routing quality before trusting it, **evaluation mode** also runs the configured model on a sample of calls and has a judge compare the answers. See [docs/evaluation.md](docs/evaluation.md) and `tokentriage eval --help`.
+
+---
+
+## Verify it works
+
+**1. See what your `tokentriage.yaml` produces.** `tokentriage check` prints the file it found and the main settings. To print any setting, run this in your app's folder:
+
+```bash
+python - <<'EOF'
+import tokentriage
+cfg, frameworks, providers = tokentriage.load_config(auto_enable=False)
+print(cfg.backend, cfg.timeout_s, cfg.sticky_threads, cfg.thread_ttl_s, cfg.escalate_after_repeats, frameworks)
+print(cfg.tiers["anthropic"])   # the tier models, with your `models:` applied
+EOF
+```
+
+With `backend: lev-local` and `block_on_load: true` this also loads lev (~10 GB of memory); try it with `backend: heuristic` on a small machine. A warning here means a key in the file is not a setting.
+
+**2. Watch the decisions.** With `log_level: DEBUG`, each call logs why that model was picked. Look for:
+
+| Log reason | Meaning |
+|---|---|
+| `sticky thread: kept complex` | the conversation stayed on its higher model |
+| `asked 3 times: moved up to standard` | a re-asked question moved the conversation up |
+| `ladder: anthropic -> openai` | OpenRouter ladder mode switched vendor |
+| `fallback after lev-local timeout` | lev was too slow, so the heuristic decided |
+
+**3. Try routing without any API key or lev:** `python examples/demo.py --backend heuristic`.
+
+**4. Check model data and cost:** `tokentriage models refresh`, then `tokentriage usage --by tier --recent 10`.
+
+**5. Contributors:** install with `pip install -e ".[dev]"` and run `pytest -q`.
 
 ---
 
@@ -414,7 +477,7 @@ Never routed: embeddings, fine-tuned or custom models (`ft:*` and others in `nev
 - **Every supported chat model in the process is routed**, including ones created inside other libraries you use. Limit this with `providers: [...]` or `tokentriage.exclude(llm)`, or opt in single instances with `tokentriage.route(llm)` instead of `load_config()`.
 - **`load_config()` blocks startup with lev-local.** The first run waits for the ~9.5 GB download, and every run waits for lev to load. Plan for this in containers and serverless functions.
 - **A timed-out lev decision keeps running in the background.** The call it belonged to has already fallen back, but decisions run one at a time, so the next calls may wait behind it and also fall back. On a machine that is too slow for lev, expect most calls to use the heuristic.
-- **Environment variables don't override the YAML.** `TOKENTRIAGE_*` variables apply only to settings the YAML leaves out. Also, `tokentriage run -- <command>` reads only environment variables, not `tokentriage.yaml`.
+- **Conversation memory is per process.** With several workers or replicas, a conversation whose calls reach different ones loses its sticky model; use session affinity at your load balancer (see [docs/deployment.md](docs/deployment.md)).
 - **lev is installed from its GitHub main branch**, so a new lev commit can change behaviour. For reproducible installs, pin lev to a commit (`...lev.git@<commit>#subdirectory=packages/lev`).
 - **Default tier models are built in** (see [How it works](#how-it-works)). If a provider retires one of those ids, calls to that tier fail. `tokentriage models refresh` makes `load_config()` warn about this; fix it under `models:`.
 - **Streamed SDK calls aren't counted in usage yet.** Streams through the Anthropic and OpenAI SDK integrations are routed and logged, but their tokens and cost don't reach `tokentriage usage`. LangChain streams are counted.
@@ -438,6 +501,12 @@ A key in `tokentriage.yaml` isn't a known setting (check the spelling); the rest
 **Routing never happens / changes to tokentriage have no effect**
 Check that `tokentriage.load_config()` runs before the first LLM call. Then check which copy is imported: `python -c "import tokentriage; print(tokentriage.__file__)"`. If it points into `site-packages` but you are editing a local checkout, install it with `uv pip install -e /path/to/tokentriage`.
 
+**`ignoring environment variables that are no longer used: ...`**
+Those variables used to set individual settings. Put the setting in `tokentriage.yaml` instead; [docs/deployment.md](docs/deployment.md) maps each old variable to its YAML key.
+
+**Routing stopped everywhere**
+Check that `TOKENTRIAGE_ENABLED` isn't set to `false` in the environment, and that `enabled: false` isn't in the file.
+
 **The download is slow or stopped**
 Re-running resumes where it stopped. To keep the ~9.5 GB elsewhere, set `HF_HOME` (e.g. `export HF_HOME=/Volumes/Drive/huggingface`) before running. Setting `HF_TOKEN` avoids anonymous Hugging Face rate limits.
 
@@ -456,7 +525,8 @@ lev isn't installed. Install it (see [Installation](#installation)), or use `bac
 | Logging, OpenTelemetry, usage store | [docs/observability.md](docs/observability.md) |
 | Security, PII redaction, guardrails, lev-http rules | [docs/security.md](docs/security.md) |
 | Evaluation mode | [docs/evaluation.md](docs/evaluation.md) |
-| Config file formats, precedence, load anywhere | [docs/config_setup.md](docs/config_setup.md) |
+| Environment variables and deployment: Docker, Kubernetes, serverless, several workers | [docs/deployment.md](docs/deployment.md) |
+| Config file formats and loading | [docs/config_setup.md](docs/config_setup.md) |
 | Llama Index | [docs/llama_index.md](docs/llama_index.md) |
 | 401 authentication errors | [docs/troubleshooting-401-auth.md](docs/troubleshooting-401-auth.md) |
 
@@ -466,6 +536,6 @@ To try routing decisions without API keys: `python examples/demo.py --backend he
 
 ## License and credits
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0: [read the license](LICENSE) · [NOTICE](NOTICE).
 
 Powered by [lev](https://github.com/InterfazeAI/lev), InterfazeAI's decision model.
